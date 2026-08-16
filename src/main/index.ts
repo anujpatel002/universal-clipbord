@@ -226,6 +226,19 @@ async function initializeApp(): Promise<void> {
     transferManager?.cancelTransfer(transferId);
   });
 
+  ipcMain.handle('connect-to-ip', async (_event, ip: string, port = 49152) => {
+    try {
+      if (!network) return false;
+      const cleanIp = ip.trim();
+      if (!cleanIp) return false;
+      await network.connectToPeer(cleanIp, port);
+      return true;
+    } catch (err) {
+      console.log(`[WARN] Manual connect to ${ip}:${port} failed: ${(err as Error).message}`);
+      return false;
+    }
+  });
+
   // Start networking
   await network.startServer();
   discovery.start();

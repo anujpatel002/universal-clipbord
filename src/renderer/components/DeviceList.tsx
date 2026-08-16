@@ -15,6 +15,9 @@ export const DeviceList: React.FC<DeviceListProps> = ({
   onSendFile,
 }) => {
   const [dragOverDevId, setDragOverDevId] = useState<string | null>(null);
+  const [showManual, setShowManual] = useState(false);
+  const [manualIp, setManualIp] = useState('');
+  const [connecting, setConnecting] = useState(false);
 
   const handleDragOver = (e: React.DragEvent, deviceId: string) => {
     e.preventDefault();
@@ -38,18 +41,67 @@ export const DeviceList: React.FC<DeviceListProps> = ({
     }
   };
 
+  const handleManualConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualIp.trim()) return;
+    setConnecting(true);
+    try {
+      const success = await window.multiclip.connectToIp(manualIp.trim());
+      if (success) {
+        setManualIp('');
+        setShowManual(false);
+      } else {
+        alert(`Could not connect to ${manualIp.trim()}. Please ensure MultiClip is running on that PC and firewall allows local connections.`);
+      }
+    } catch (err) {
+      alert(`Connection error: ${(err as Error).message}`);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   return (
     <div className="section-card">
       <div className="section-title">
-        <span>Devices on LAN (Drag & Drop files to send)</span>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-          {devices.filter((d) => d.status === 'online').length} online
-        </span>
+        <span>Devices on LAN (Auto-Discovered & Direct)</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+            {devices.filter((d) => d.status === 'online').length} online
+          </span>
+          <button
+            className="btn btn-sm btn-secondary"
+            onClick={() => setShowManual(!showManual)}
+            style={{ fontSize: '0.75rem', padding: '3px 8px' }}
+          >
+            {showManual ? 'Close' : '+ Connect IP'}
+          </button>
+        </div>
       </div>
+
+      {showManual && (
+        <form onSubmit={handleManualConnect} style={{ display: 'flex', gap: '8px', marginBottom: '12px', padding: '8px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="Enter peer IP (e.g. 192.168.1.15)"
+            value={manualIp}
+            onChange={(e) => setManualIp(e.target.value)}
+            style={{ flex: 1, padding: '6px 10px', fontSize: '0.85rem' }}
+          />
+          <button type="submit" className="btn btn-sm btn-primary" disabled={connecting || !manualIp.trim()}>
+            {connecting ? 'Connecting...' : 'Connect'}
+          </button>
+        </form>
+      )}
 
       <div className="device-list">
         {devices.length === 0 ? (
-          <div className="empty-state">No other MultiClip devices discovered yet.</div>
+          <div className="empty-state">
+            Scanning LAN with mDNS & UDP broadcast...<br/>
+            <span style={{ fontSize: '0.8rem', opacity: 0.75 }}>
+              Tip: Ensure both PCs are on the same Wi-Fi / Router. You can also click "+ Connect IP" above.
+            </span>
+          </div>
         ) : (
           devices.map((device) => (
             <div
