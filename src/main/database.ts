@@ -252,6 +252,12 @@ export class AppDatabase {
     return items;
   }
 
+  public clearClipboardHistory(): void {
+    if (!this.db || !this.isOpen) return;
+    this.db.run('DELETE FROM clipboard_items');
+    this.saveToDisk();
+  }
+
   // Transfers
   public saveTransfer(transfer: Transfer): void {
     if (!this.db || !this.isOpen) return;

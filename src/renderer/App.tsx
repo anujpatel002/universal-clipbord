@@ -114,6 +114,11 @@ export const App: React.FC = () => {
     await window.multiclip?.cancelTransfer(transferId);
   };
 
+  const handleClearHistory = async () => {
+    await window.multiclip?.clearClipboardHistory();
+    setClipboardItems([]);
+  };
+
   return (
     <div className="app-container">
       <header className="app-header">
@@ -157,6 +162,7 @@ export const App: React.FC = () => {
         onSendToDevice={handleSendToDevice}
         onCopyToClipboard={handleCopyToClipboard}
         onRequestFile={handleRequestFile}
+        onClearHistory={handleClearHistory}
       />
 
       <TransferSection

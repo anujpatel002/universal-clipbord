@@ -143,6 +143,7 @@ export interface MultiClipAPI {
   cancelTransfer: (transferId: string) => Promise<void>;
   connectToIp: (ip: string, port?: number) => Promise<{ success: boolean; error?: string }>;
   rescanPeers: () => Promise<void>;
+  clearClipboardHistory: () => Promise<void>;
   onDeviceUpdate: (callback: (devices: Device[]) => void) => () => void;
   onClipboardUpdate: (callback: (item: ClipboardItem) => void) => () => void;
   onTransferUpdate: (callback: (transfer: Transfer) => void) => () => void;

@@ -91,7 +91,7 @@ export class ClipboardMonitor extends EventEmitter {
     try {
       if (typeof clipboard.readBuffer !== 'function') return null;
 
-      // Windows Explorer File Copy format: FileNameW (UTF-16LE null-terminated)
+      // 1. Windows FileNameW (UTF-16LE null-terminated)
       if (process.platform === 'win32') {
         const buf = clipboard.readBuffer('FileNameW');
         if (buf && buf.length > 0) {
@@ -101,13 +101,33 @@ export class ClipboardMonitor extends EventEmitter {
             return filePath;
           }
         }
+
+        // 2. Windows HDROP buffer parser (DROPFILES struct)
+        for (const fmt of ['HDROP', 'CF_HDROP']) {
+          const hdropBuf = clipboard.readBuffer(fmt);
+          if (hdropBuf && hdropBuf.length >= 20) {
+            const offset = hdropBuf.readUInt32LE(0);
+            const isWide = hdropBuf.readUInt32LE(16) === 1;
+            if (offset < hdropBuf.length) {
+              const rawStr = isWide
+                ? hdropBuf.subarray(offset).toString('utf16le')
+                : hdropBuf.subarray(offset).toString('ascii');
+              const filePath = rawStr.split('\0')[0].trim();
+              if (filePath && fs.existsSync(filePath)) {
+                return filePath;
+              }
+            }
+          }
+        }
       }
 
-      // Linux / macOS text/uri-list
+      // 3. Linux / macOS text/uri-list
       const uriBuf = clipboard.readBuffer('text/uri-list');
       if (uriBuf && uriBuf.length > 0) {
         const uriStr = uriBuf.toString('utf8').trim();
-        const filePath = uriStr.replace(/^file:\/\//, '').split('\r\n')[0];
+        const filePath = decodeURIComponent(
+          uriStr.replace(/^file:\/\//, '').split('\r\n')[0].replace(/^\/([A-Za-z]:)/, '$1')
+        );
         if (filePath && fs.existsSync(filePath)) {
           return filePath;
         }

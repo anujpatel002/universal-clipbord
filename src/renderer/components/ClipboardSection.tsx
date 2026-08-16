@@ -8,6 +8,7 @@ interface ClipboardSectionProps {
   onSendToDevice: (deviceId: string, item: ClipboardItem) => void;
   onCopyToClipboard: (text: string) => void;
   onRequestFile: (sourceDeviceId: string, remoteFilePath: string) => void;
+  onClearHistory: () => void;
 }
 
 export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
@@ -17,6 +18,7 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
   onSendToDevice,
   onCopyToClipboard,
   onRequestFile,
+  onClearHistory,
 }) => {
   const [inputText, setInputText] = useState('');
   const [selectedTarget, setSelectedTarget] = useState<string>('broadcast');
@@ -69,7 +71,19 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
     <div className="section-card">
       <div className="section-title">
         <span>Clipboard Activity & Sync</span>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{items.length} items</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{items.length} items</span>
+          {items.length > 0 && (
+            <button
+              className="btn btn-sm btn-secondary"
+              onClick={onClearHistory}
+              style={{ fontSize: '0.75rem', padding: '2px 8px' }}
+              title="Clear local clipboard history list"
+            >
+              Clear History
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Quick Text Share Box */}

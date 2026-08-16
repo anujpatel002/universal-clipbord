@@ -161,6 +161,7 @@ async function initializeApp(): Promise<void> {
   ipcMain.handle('get-local-info', () => network?.getLocalInfo());
   ipcMain.handle('get-devices', () => network?.getAllDevices());
   ipcMain.handle('get-clipboard-history', () => db?.getClipboardHistory());
+  ipcMain.handle('clear-clipboard-history', () => db?.clearClipboardHistory());
   ipcMain.handle('get-transfers', () => db?.getTransfers());
   
   ipcMain.handle('pair-device', (_event, deviceId: string) => {

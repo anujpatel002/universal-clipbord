@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('multiclip', {
   connectToIp: (ip: string, port?: number): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('connect-to-ip', ip, port),
   rescanPeers: (): Promise<void> => ipcRenderer.invoke('rescan-peers'),
+  clearClipboardHistory: (): Promise<void> => ipcRenderer.invoke('clear-clipboard-history'),
 
   onDeviceUpdate: (callback: (devices: Device[]) => void) => {
     const handler = (_: unknown, devices: Device[]) => callback(devices);
