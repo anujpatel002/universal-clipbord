@@ -87,6 +87,9 @@ export class AppDatabase {
         chunk_index INTEGER NOT NULL,
         PRIMARY KEY (transfer_id, chunk_index)
       );
+
+      DELETE FROM clipboard_items WHERE name LIKE '%Folder is not supported%';
+      DELETE FROM clipboard_items WHERE content LIKE '%Folder is not supported%';
     `);
     this.saveToDisk();
   }

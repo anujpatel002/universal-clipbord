@@ -11,7 +11,7 @@
     "dist:win": "npm run build && electron-builder --win --dir",
     "dist:exe": "npm run build && electron-builder --win portable",
     "dist:installer": "npm run build && electron-builder --win nsis",
-    "start": "electron .",
+    "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/**/*.test.ts"
   },

@@ -186,7 +186,11 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
                 <div className="clipboard-body-content">
                   {item.type === 'file' ? (
                     <span>
-                      {item.isFolder ? '📂' : '📄'} <strong>{item.name}</strong> ({formatBytes(item.size || 0)})
+                      {item.isFolder ? '📂' : '📄'}{' '}
+                      <strong>
+                        {item.name?.replace(/\s*-\s*Folder is not supported.*$/i, '') || item.name}
+                      </strong>{' '}
+                      ({formatBytes(item.size || 0)})
                     </span>
                   ) : (
                     item.content
