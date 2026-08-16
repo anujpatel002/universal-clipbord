@@ -11,7 +11,7 @@ import { scanDirectoryFiles, FileEntry } from './archive.js';
 
 // High-speed LAN optimized chunk size (4 MB)
 export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
-export const MAX_PIPELINE_WINDOW = 4; // 4 parallel chunks in flight (16 MB window)
+export const MAX_PIPELINE_WINDOW = 8; // 8 parallel chunks in flight (32 MB window)
 
 export function getUniqueFilePath(dir: string, fileName: string): string {
   const ext = path.extname(fileName);
@@ -338,7 +338,7 @@ export class TransferManager extends EventEmitter {
           const end = Math.min(start + transfer.chunkSize - 1, file.size - 1);
           const currentChunkSize = end - start + 1;
 
-          const chunkBuffer = await this.readChunkStream(file.fullPath, start, end);
+          const chunkBuffer = await this.readChunkDirect(file.fullPath, start, end);
 
           const chunkFrame = encodeChunk(
             {
@@ -421,7 +421,7 @@ export class TransferManager extends EventEmitter {
         const end = Math.min(start + transfer.chunkSize - 1, transfer.size - 1);
         const currentChunkSize = transfer.size === 0 ? 0 : end - start + 1;
 
-        const chunkBuffer = await this.readChunkStream(sourcePath, start, end);
+        const chunkBuffer = await this.readChunkDirect(sourcePath, start, end);
 
         const chunkFrame = encodeChunk(
           {
@@ -462,17 +462,17 @@ export class TransferManager extends EventEmitter {
     }
   }
 
-  private readChunkStream(filePath: string, start: number, end: number): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      if (end < start) {
-        return resolve(Buffer.alloc(0));
-      }
-      const chunks: Buffer[] = [];
-      const stream = fs.createReadStream(filePath, { start, end, highWaterMark: DEFAULT_CHUNK_SIZE });
-      stream.on('data', (data: Buffer | string) => chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(data)));
-      stream.on('end', () => resolve(Buffer.concat(chunks)));
-      stream.on('error', (err) => reject(err));
-    });
+  private async readChunkDirect(filePath: string, start: number, end: number): Promise<Buffer> {
+    if (end < start) return Buffer.alloc(0);
+    const size = end - start + 1;
+    const buf = Buffer.allocUnsafe(size);
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+      await handle.read(buf, 0, size, start);
+      return buf;
+    } finally {
+      await handle.close();
+    }
   }
 
   private handleChunkAck(payload: Record<string, any>): void {
