@@ -7,6 +7,7 @@ import { Transfer, ProtocolMessage } from '../shared/types.js';
 import { NetworkManager } from './network.js';
 import { AppDatabase } from './database.js';
 import { encodeChunk, ChunkMessage } from './protocol.js';
+import { zipFolder, unzipArchive } from './archive.js';
 
 export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks
 
@@ -37,6 +38,7 @@ export function calculateFileHash(filePath: string): Promise<string> {
 interface OutboundTransferSession {
   transfer: Transfer;
   filePath: string;
+  isTempFile: boolean;
   currentChunk: number;
   paused: boolean;
   cancelled: boolean;
@@ -77,46 +79,61 @@ export class TransferManager extends EventEmitter {
   }
 
   private registerNetworkHandlers(): void {
-    this.network.on('message', ({ deviceId, message }: { deviceId: string | null; message: ProtocolMessage }) => {
+    this.network.on('message', ({ deviceId, message }) => {
       this.handleProtocolMessage(deviceId, message);
     });
 
-    this.network.on('chunk', ({ deviceId, chunk }: { deviceId: string | null; chunk: ChunkMessage }) => {
+    this.network.on('chunk', ({ deviceId, chunk }) => {
       this.handleInboundChunk(deviceId, chunk);
     });
   }
 
   private handleProtocolMessage(deviceId: string | null, message: ProtocolMessage): void {
-    const payload = message.payload as Record<string, any>;
-
     switch (message.type) {
       case 'TRANSFER_REQUEST':
-        this.handleTransferRequest(deviceId, payload);
+        this.handleTransferRequest(deviceId, message.payload as Record<string, any>);
         break;
       case 'TRANSFER_ACCEPT':
-        this.handleTransferAccept(payload);
+        this.handleTransferAccept(message.payload as Record<string, any>);
         break;
       case 'TRANSFER_REJECT':
-        this.handleTransferReject(payload);
+        this.handleTransferReject(message.payload as Record<string, any>);
         break;
       case 'CHUNK_ACK':
-        this.handleChunkAck(payload);
+        this.handleChunkAck(message.payload as Record<string, any>);
         break;
       case 'TRANSFER_PAUSE':
-        this.handleRemotePause(payload);
+        this.handleRemotePause(message.payload as Record<string, any>);
         break;
       case 'TRANSFER_RESUME':
-        this.handleRemoteResume(payload);
+        this.handleRemoteResume(message.payload as Record<string, any>);
         break;
       case 'TRANSFER_CANCEL':
-        this.handleRemoteCancel(payload);
+        this.handleRemoteCancel(message.payload as Record<string, any>);
         break;
       case 'TRANSFER_COMPLETE':
-        this.handleRemoteComplete(payload);
+        this.handleRemoteComplete(message.payload as Record<string, any>);
         break;
       case 'REQUEST_FILE':
-        this.handleIncomingFileRequest(deviceId, payload);
+        this.handleRequestFile(deviceId, message.payload as Record<string, any>);
         break;
+      default:
+        break;
+    }
+  }
+
+  private async handleRequestFile(deviceId: string | null, payload: Record<string, any>): Promise<void> {
+    if (!deviceId) return;
+    const { filePath } = payload;
+    if (!filePath || !fs.existsSync(filePath)) {
+      console.log(`[WARN] Peer requested non-existent file: ${filePath}`);
+      return;
+    }
+
+    try {
+      await this.startOutboundTransfer(deviceId, filePath);
+    } catch (err) {
+      console.log(`[WARN] Failed to start requested transfer to ${deviceId}: ${(err as Error).message}`);
     }
   }
 
@@ -127,19 +144,6 @@ export class TransferManager extends EventEmitter {
     });
   }
 
-  private handleIncomingFileRequest(deviceId: string | null, payload: Record<string, any>): void {
-    if (!deviceId) return;
-    const sender = this.network.getDevice(deviceId);
-    if (!sender || !sender.trusted) return;
-
-    const { filePath } = payload;
-    if (filePath && fs.existsSync(filePath)) {
-      this.startOutboundTransfer(deviceId, filePath).catch((err) => {
-        console.log(`[WARN] Failed to start requested transfer for ${filePath}: ${err.message}`);
-      });
-    }
-  }
-
   // --- Outbound Transfers ---
 
   public async startOutboundTransfer(targetDeviceId: string, filePath: string): Promise<Transfer> {
@@ -148,7 +152,7 @@ export class TransferManager extends EventEmitter {
     }
 
     const stats = fs.statSync(filePath);
-    const fileName = path.basename(filePath);
+    const isFolder = stats.isDirectory();
     const local = this.network.getLocalInfo();
     const target = this.network.getDevice(targetDeviceId);
 
@@ -156,8 +160,27 @@ export class TransferManager extends EventEmitter {
       throw new Error(`Target device not found: ${targetDeviceId}`);
     }
 
-    const totalChunks = Math.ceil(stats.size / DEFAULT_CHUNK_SIZE) || 1;
     const transferId = crypto.randomUUID();
+    let actualPath = filePath;
+    let actualSize = stats.size;
+    let fileName = path.basename(filePath);
+    let folderName: string | undefined;
+    let isTempFile = false;
+
+    // Automatic recursive folder zipping on the fly
+    if (isFolder) {
+      folderName = path.basename(filePath);
+      fileName = `${folderName}.zip`;
+      const tempDir = path.join(this.downloadDir, '.temp_zip');
+      const tempZipPath = path.join(tempDir, `${folderName}_${transferId.slice(0, 8)}.zip`);
+      await zipFolder(filePath, tempZipPath);
+      actualPath = tempZipPath;
+      const zipStats = fs.statSync(tempZipPath);
+      actualSize = zipStats.size;
+      isTempFile = true;
+    }
+
+    const totalChunks = Math.ceil(actualSize / DEFAULT_CHUNK_SIZE) || 1;
 
     const transfer: Transfer = {
       id: transferId,
@@ -166,11 +189,13 @@ export class TransferManager extends EventEmitter {
       destinationDeviceId: target.id,
       destinationDeviceName: target.name,
       fileName,
-      size: stats.size,
+      size: actualSize,
       transferred: 0,
       chunkSize: DEFAULT_CHUNK_SIZE,
       totalChunks,
       status: 'pending',
+      isFolder,
+      folderName,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -180,7 +205,8 @@ export class TransferManager extends EventEmitter {
 
     this.outboundSessions.set(transferId, {
       transfer,
-      filePath,
+      filePath: actualPath,
+      isTempFile,
       currentChunk: 0,
       paused: false,
       cancelled: false,
@@ -193,9 +219,11 @@ export class TransferManager extends EventEmitter {
       payload: {
         transferId,
         fileName,
-        fileSize: stats.size,
+        fileSize: actualSize,
         chunkSize: DEFAULT_CHUNK_SIZE,
         totalChunks,
+        isFolder,
+        folderName,
       },
     });
 
@@ -224,6 +252,10 @@ export class TransferManager extends EventEmitter {
     session.transfer.error = reason || 'Transfer rejected by peer';
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
+
+    if (session.isTempFile) {
+      try { fs.unlinkSync(session.filePath); } catch {}
+    }
     this.outboundSessions.delete(transferId);
   }
 
@@ -236,7 +268,7 @@ export class TransferManager extends EventEmitter {
       const end = Math.min(start + transfer.chunkSize - 1, transfer.size - 1);
       const currentChunkSize = transfer.size === 0 ? 0 : end - start + 1;
 
-      // Stream read single chunk using fs.createReadStream (never load entire file into memory)
+      // Stream read single chunk using fs.createReadStream (zero-RAM overhead)
       const chunkBuffer = await this.readChunkStream(filePath, start, end);
 
       const chunkFrame = encodeChunk(
@@ -282,6 +314,9 @@ export class TransferManager extends EventEmitter {
         },
       });
 
+      if (session.isTempFile) {
+        try { fs.unlinkSync(session.filePath); } catch {}
+      }
       this.outboundSessions.delete(transfer.id);
     }
   }
@@ -311,7 +346,7 @@ export class TransferManager extends EventEmitter {
   // --- Inbound Transfers ---
 
   private handleTransferRequest(deviceId: string | null, payload: Record<string, any>): void {
-    const { transferId, fileName, fileSize, chunkSize, totalChunks } = payload;
+    const { transferId, fileName, fileSize, chunkSize, totalChunks, isFolder, folderName } = payload;
 
     const sender = deviceId ? this.network.getDevice(deviceId) : null;
     if (!sender || !sender.trusted) {
@@ -328,7 +363,6 @@ export class TransferManager extends EventEmitter {
     const finalPath = getUniqueFilePath(this.downloadDir, fileName);
     const partPath = `${finalPath}.part`;
 
-    // Open .part file for random-access chunk writing
     const fd = fs.openSync(partPath, 'w+');
 
     const transfer: Transfer = {
@@ -343,6 +377,8 @@ export class TransferManager extends EventEmitter {
       chunkSize: chunkSize || DEFAULT_CHUNK_SIZE,
       totalChunks: totalChunks || 1,
       status: 'transferring',
+      isFolder: !!isFolder,
+      folderName,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -375,7 +411,6 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(header.transferId);
     if (!session) return;
 
-    // Write chunk at exact byte position (random access streaming write)
     const offset = header.chunkIndex * session.transfer.chunkSize;
     if (data.length > 0) {
       fs.writeSync(session.fd, data, 0, data.length, offset);
@@ -391,7 +426,6 @@ export class TransferManager extends EventEmitter {
       session.transfer.transferred = 0;
     }
 
-    // Calculate speed
     const now = Date.now();
     const timeDelta = (now - session.lastProgressTime) / 1000;
     if (timeDelta >= 0.5) {
@@ -405,7 +439,6 @@ export class TransferManager extends EventEmitter {
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
-    // Send ACK back to sender
     const targetDevId = deviceId || session.transfer.sourceDeviceId;
     this.network.sendMessage(targetDevId, {
       type: 'CHUNK_ACK',
@@ -416,20 +449,30 @@ export class TransferManager extends EventEmitter {
     });
   }
 
-  private handleRemoteComplete(payload: Record<string, any>): void {
+  private async handleRemoteComplete(payload: Record<string, any>): Promise<void> {
     const { transferId } = payload;
     const session = this.inboundSessions.get(transferId);
     if (!session) return;
 
     try {
       fs.closeSync(session.fd);
-    } catch {
-      // Already closed
-    }
+    } catch {}
 
     // Rename .part to final destination
     if (fs.existsSync(session.partPath)) {
       fs.renameSync(session.partPath, session.finalPath);
+    }
+
+    // Auto-extract folder if this was an auto-zipped folder
+    if (session.transfer.isFolder && session.transfer.folderName) {
+      try {
+        const extractTarget = getUniqueFilePath(this.downloadDir, session.transfer.folderName);
+        await unzipArchive(session.finalPath, extractTarget);
+        try { fs.unlinkSync(session.finalPath); } catch {}
+        session.transfer.fileName = path.basename(extractTarget);
+      } catch (err) {
+        console.log(`[WARN] Failed to auto-extract folder: ${(err as Error).message}`);
+      }
     }
 
     session.transfer.status = 'completed';
@@ -448,21 +491,11 @@ export class TransferManager extends EventEmitter {
     if (outSession) {
       outSession.paused = true;
       outSession.transfer.status = 'paused';
+      outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
-      this.network.sendMessage(outSession.transfer.destinationDeviceId, {
-        type: 'TRANSFER_PAUSE',
-        payload: { transferId },
-      });
-      return;
-    }
 
-    const inSession = this.inboundSessions.get(transferId);
-    if (inSession) {
-      inSession.transfer.status = 'paused';
-      this.db.saveTransfer(inSession.transfer);
-      this.emit('transfer_updated', inSession.transfer);
-      this.network.sendMessage(inSession.transfer.sourceDeviceId, {
+      this.network.sendMessage(outSession.transfer.destinationDeviceId, {
         type: 'TRANSFER_PAUSE',
         payload: { transferId },
       });
@@ -471,28 +504,19 @@ export class TransferManager extends EventEmitter {
 
   public resumeTransfer(transferId: string): void {
     const outSession = this.outboundSessions.get(transferId);
-    if (outSession) {
+    if (outSession && outSession.paused) {
       outSession.paused = false;
       outSession.transfer.status = 'transferring';
+      outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
-      this.network.sendMessage(outSession.transfer.destinationDeviceId, {
-        type: 'TRANSFER_RESUME',
-        payload: { transferId, fromChunkIndex: outSession.currentChunk },
-      });
-      this.streamOutboundChunks(outSession);
-      return;
-    }
 
-    const inSession = this.inboundSessions.get(transferId);
-    if (inSession) {
-      inSession.transfer.status = 'transferring';
-      this.db.saveTransfer(inSession.transfer);
-      this.emit('transfer_updated', inSession.transfer);
-      this.network.sendMessage(inSession.transfer.sourceDeviceId, {
+      this.network.sendMessage(outSession.transfer.destinationDeviceId, {
         type: 'TRANSFER_RESUME',
         payload: { transferId },
       });
+
+      this.streamOutboundChunks(outSession);
     }
   }
 
@@ -501,90 +525,64 @@ export class TransferManager extends EventEmitter {
     if (outSession) {
       outSession.cancelled = true;
       outSession.transfer.status = 'cancelled';
+      outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
+
       this.network.sendMessage(outSession.transfer.destinationDeviceId, {
         type: 'TRANSFER_CANCEL',
-        payload: { transferId, reason: 'Cancelled by user' },
+        payload: { transferId },
       });
+
+      if (outSession.isTempFile) {
+        try { fs.unlinkSync(outSession.filePath); } catch {}
+      }
       this.outboundSessions.delete(transferId);
-      return;
     }
 
     const inSession = this.inboundSessions.get(transferId);
     if (inSession) {
-      try {
-        fs.closeSync(inSession.fd);
-        if (fs.existsSync(inSession.partPath)) {
-          fs.unlinkSync(inSession.partPath);
-        }
-      } catch {
-        // cleanup
-      }
+      try { fs.closeSync(inSession.fd); } catch {}
+      try { if (fs.existsSync(inSession.partPath)) fs.unlinkSync(inSession.partPath); } catch {}
 
       inSession.transfer.status = 'cancelled';
+      inSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(inSession.transfer);
       this.emit('transfer_updated', inSession.transfer);
-      this.network.sendMessage(inSession.transfer.sourceDeviceId, {
-        type: 'TRANSFER_CANCEL',
-        payload: { transferId, reason: 'Cancelled by user' },
-      });
+
       this.inboundSessions.delete(transferId);
     }
   }
 
   private handleRemotePause(payload: Record<string, any>): void {
     const { transferId } = payload;
-    const outSession = this.outboundSessions.get(transferId);
-    if (outSession) {
-      outSession.paused = true;
-      outSession.transfer.status = 'paused';
-      this.db.saveTransfer(outSession.transfer);
-      this.emit('transfer_updated', outSession.transfer);
+    const session = this.inboundSessions.get(transferId);
+    if (session) {
+      session.transfer.status = 'paused';
+      this.db.saveTransfer(session.transfer);
+      this.emit('transfer_updated', session.transfer);
     }
   }
 
   private handleRemoteResume(payload: Record<string, any>): void {
-    const { transferId, fromChunkIndex } = payload;
-    const outSession = this.outboundSessions.get(transferId);
-    if (outSession) {
-      if (typeof fromChunkIndex === 'number') {
-        outSession.currentChunk = fromChunkIndex;
-      }
-      outSession.paused = false;
-      outSession.transfer.status = 'transferring';
-      this.db.saveTransfer(outSession.transfer);
-      this.emit('transfer_updated', outSession.transfer);
-      this.streamOutboundChunks(outSession);
+    const { transferId } = payload;
+    const session = this.inboundSessions.get(transferId);
+    if (session) {
+      session.transfer.status = 'transferring';
+      this.db.saveTransfer(session.transfer);
+      this.emit('transfer_updated', session.transfer);
     }
   }
 
   private handleRemoteCancel(payload: Record<string, any>): void {
-    const { transferId, reason } = payload;
-    const outSession = this.outboundSessions.get(transferId);
-    if (outSession) {
-      outSession.cancelled = true;
-      outSession.transfer.status = 'cancelled';
-      outSession.transfer.error = reason;
-      this.db.saveTransfer(outSession.transfer);
-      this.emit('transfer_updated', outSession.transfer);
-      this.outboundSessions.delete(transferId);
-    }
-
-    const inSession = this.inboundSessions.get(transferId);
-    if (inSession) {
-      try {
-        fs.closeSync(inSession.fd);
-        if (fs.existsSync(inSession.partPath)) {
-          fs.unlinkSync(inSession.partPath);
-        }
-      } catch {
-        // cleanup
-      }
-      inSession.transfer.status = 'cancelled';
-      inSession.transfer.error = reason;
-      this.db.saveTransfer(inSession.transfer);
-      this.emit('transfer_updated', inSession.transfer);
+    const { transferId } = payload;
+    const session = this.inboundSessions.get(transferId);
+    if (session) {
+      try { fs.closeSync(session.fd); } catch {}
+      try { if (fs.existsSync(session.partPath)) fs.unlinkSync(session.partPath); } catch {}
+      session.transfer.status = 'cancelled';
+      this.db.saveTransfer(session.transfer);
+      this.emit('transfer_updated', session.transfer);
       this.inboundSessions.delete(transferId);
     }
   }

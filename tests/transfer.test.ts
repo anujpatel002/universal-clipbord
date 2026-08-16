@@ -172,4 +172,38 @@ describe('Phase 3 & 4: Resumable Streaming File Transfer', () => {
     const destHash = await calculateFileHash(destFilePath);
     assert.strictEqual(destHash, sourceHash, 'Resumed file hash must match original');
   });
+
+  test('Auto-zips, streams, and auto-extracts whole directory with nested subfolders', async () => {
+    const infoB = nodeB.getLocalInfo();
+    const testFolder = path.join(dirA, 'my_project_folder');
+    const subFolder = path.join(testFolder, 'sub_directory');
+    fs.mkdirSync(subFolder, { recursive: true });
+
+    fs.writeFileSync(path.join(testFolder, 'readme.txt'), 'Hello world in root folder');
+    fs.writeFileSync(path.join(subFolder, 'nested_code.js'), 'console.log("nested file content");');
+
+    const completePromise = new Promise<string>((resolve) => {
+      const handler = (t: any) => {
+        if (t.folderName === 'my_project_folder' && t.status === 'completed') {
+          txB.off('transfer_updated', handler);
+          resolve(path.join(downloadsB, t.fileName));
+        }
+      };
+      txB.on('transfer_updated', handler);
+    });
+
+    await txA.startOutboundTransfer(infoB.id, testFolder);
+
+    const destFolderPath = await completePromise;
+    assert.ok(fs.existsSync(destFolderPath), 'Destination folder must exist');
+    assert.ok(fs.statSync(destFolderPath).isDirectory(), 'Destination must be a directory');
+
+    const rootFile = path.join(destFolderPath, 'readme.txt');
+    const nestedFile = path.join(destFolderPath, 'sub_directory', 'nested_code.js');
+
+    assert.ok(fs.existsSync(rootFile), 'Root file must exist');
+    assert.ok(fs.existsSync(nestedFile), 'Nested file must exist');
+    assert.strictEqual(fs.readFileSync(rootFile, 'utf8'), 'Hello world in root folder');
+    assert.strictEqual(fs.readFileSync(nestedFile, 'utf8'), 'console.log("nested file content");');
+  });
 });

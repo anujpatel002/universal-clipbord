@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { ClipboardItem } from '../shared/types.js';
 import { NetworkManager } from './network.js';
 import { AppDatabase } from './database.js';
+import { calculateFolderSize } from './archive.js';
 
 export class ClipboardMonitor extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
@@ -121,14 +122,19 @@ export class ClipboardMonitor extends EventEmitter {
     try {
       if (!fs.existsSync(filePath)) return null;
       const stats = fs.statSync(filePath);
+      const isDir = stats.isDirectory();
       const local = this.network.getLocalInfo();
+      const baseName = path.basename(filePath);
+      const size = isDir ? calculateFolderSize(filePath) : stats.size;
 
       const item: ClipboardItem = {
         id: crypto.randomUUID(),
         type: 'file',
-        name: path.basename(filePath),
-        size: stats.size,
+        name: isDir ? `${baseName} (Folder)` : baseName,
+        size,
         path: filePath,
+        isFolder: isDir,
+        folderName: isDir ? baseName : undefined,
         sourceDeviceId: local.id,
         sourceDeviceName: local.name,
         timestamp: Date.now(),

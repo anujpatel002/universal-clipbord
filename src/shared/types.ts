@@ -26,6 +26,8 @@ export interface ClipboardItem {
   name?: string;    // File or image name
   size?: number;    // File size in bytes
   path?: string;    // Local path if copied locally
+  isFolder?: boolean;
+  folderName?: string;
   sourceDeviceId: string;
   sourceDeviceName: string;
   timestamp: number;
@@ -52,6 +54,8 @@ export interface Transfer {
   chunkSize: number;
   totalChunks: number;
   status: TransferStatus;
+  isFolder?: boolean;
+  folderName?: string;
   speed?: number; // bytes/sec
   error?: string;
   createdAt: number;
