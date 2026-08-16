@@ -173,7 +173,7 @@ describe('Phase 3 & 4: Resumable Streaming File Transfer', () => {
     assert.strictEqual(destHash, sourceHash, 'Resumed file hash must match original');
   });
 
-  test('Auto-zips, streams, and auto-extracts whole directory with nested subfolders', async () => {
+  test('Directly streams and writes whole directory with nested subfolders (Zero ZIP/TAR)', async () => {
     const infoB = nodeB.getLocalInfo();
     const testFolder = path.join(dirA, 'my_project_folder');
     const subFolder = path.join(testFolder, 'sub_directory');

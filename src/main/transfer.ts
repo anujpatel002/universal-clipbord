@@ -3,11 +3,11 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { EventEmitter } from 'node:events';
-import { Transfer, ProtocolMessage } from '../shared/types.js';
+import { Transfer, ProtocolMessage, FileStartPayload } from '../shared/types.js';
 import { NetworkManager } from './network.js';
 import { AppDatabase } from './database.js';
 import { encodeChunk, ChunkMessage } from './protocol.js';
-import { packDirectoryToTar, extractTarArchive } from './archive.js';
+import { scanDirectoryFiles, FileEntry } from './archive.js';
 
 // High-speed LAN optimized chunk size (4 MB)
 export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -39,9 +39,10 @@ export function calculateFileHash(filePath: string): Promise<string> {
 
 interface OutboundTransferSession {
   transfer: Transfer;
-  filePath: string;
-  isTempFile: boolean;
-  nextChunkToSend: number;
+  sourcePath: string;
+  isFolder: boolean;
+  fileEntries?: FileEntry[];
+  currentFileIndex: number;
   acknowledgedCount: number;
   inFlightChunks: Set<number>;
   paused: boolean;
@@ -53,9 +54,10 @@ interface OutboundTransferSession {
 
 interface InboundTransferSession {
   transfer: Transfer;
-  partPath: string;
+  targetFolder?: string; // For directory transfers
+  partPath?: string;     // For single file transfers
   finalPath: string;
-  fd: number;
+  currentFd?: number;    // Open descriptor for current file being written
   completedCount: number;
   lastProgressTime: number;
   lastTransferredBytes: number;
@@ -105,6 +107,12 @@ export class TransferManager extends EventEmitter {
       case 'TRANSFER_REJECT':
         this.handleTransferReject(message.payload as Record<string, any>);
         break;
+      case 'FILE_START':
+        this.handleFileStart(message.payload as FileStartPayload);
+        break;
+      case 'FILE_COMPLETE':
+        this.handleFileComplete(message.payload as Record<string, any>);
+        break;
       case 'CHUNK_ACK':
         this.handleChunkAck(message.payload as Record<string, any>);
         break;
@@ -132,7 +140,7 @@ export class TransferManager extends EventEmitter {
     if (!deviceId) return;
     const { filePath } = payload;
     if (!filePath || !fs.existsSync(filePath)) {
-      console.log(`[WARN] Peer requested non-existent file: ${filePath}`);
+      console.log(`[WARN] Peer requested non-existent file/folder: ${filePath}`);
       return;
     }
 
@@ -154,7 +162,7 @@ export class TransferManager extends EventEmitter {
 
   public async startOutboundTransfer(targetDeviceId: string, filePath: string): Promise<Transfer> {
     if (!fs.existsSync(filePath)) {
-      throw new Error(`File does not exist: ${filePath}`);
+      throw new Error(`Path does not exist: ${filePath}`);
     }
 
     const stats = fs.statSync(filePath);
@@ -167,24 +175,18 @@ export class TransferManager extends EventEmitter {
     }
 
     const transferId = crypto.randomUUID();
-    let actualPath = filePath;
-    let actualSize = stats.size;
-    let fileName = path.basename(filePath);
-    let folderName: string | undefined;
-    let isTempFile = false;
+    let totalSize = stats.size;
+    let fileEntries: FileEntry[] | undefined;
+    const fileName = path.basename(filePath);
+    let totalChunks = 0;
 
-    // Automatic zero-RAM streaming folder packer
     if (isFolder) {
-      folderName = path.basename(filePath);
-      fileName = `${folderName}.tar`;
-      const tempDir = path.join(this.downloadDir, '.temp_archive');
-      const tempTarPath = path.join(tempDir, `${folderName}_${transferId.slice(0, 8)}.tar`);
-      actualSize = await packDirectoryToTar(filePath, tempTarPath);
-      actualPath = tempTarPath;
-      isTempFile = true;
+      fileEntries = await scanDirectoryFiles(filePath);
+      totalSize = fileEntries.reduce((sum, f) => sum + f.size, 0);
+      totalChunks = Math.ceil(totalSize / DEFAULT_CHUNK_SIZE) || 1;
+    } else {
+      totalChunks = Math.ceil(stats.size / DEFAULT_CHUNK_SIZE) || 1;
     }
-
-    const totalChunks = Math.ceil(actualSize / DEFAULT_CHUNK_SIZE) || 1;
 
     const transfer: Transfer = {
       id: transferId,
@@ -193,13 +195,15 @@ export class TransferManager extends EventEmitter {
       destinationDeviceId: target.id,
       destinationDeviceName: target.name,
       fileName,
-      size: actualSize,
+      size: totalSize,
       transferred: 0,
       chunkSize: DEFAULT_CHUNK_SIZE,
       totalChunks,
       status: 'pending',
       isFolder,
-      folderName,
+      folderName: isFolder ? fileName : undefined,
+      totalFiles: isFolder && fileEntries ? fileEntries.length : 1,
+      completedFiles: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -209,9 +213,10 @@ export class TransferManager extends EventEmitter {
 
     this.outboundSessions.set(transferId, {
       transfer,
-      filePath: actualPath,
-      isTempFile,
-      nextChunkToSend: 0,
+      sourcePath: filePath,
+      isFolder,
+      fileEntries,
+      currentFileIndex: 0,
       acknowledgedCount: 0,
       inFlightChunks: new Set(),
       paused: false,
@@ -227,11 +232,12 @@ export class TransferManager extends EventEmitter {
       payload: {
         transferId,
         fileName,
-        fileSize: actualSize,
+        fileSize: totalSize,
         chunkSize: DEFAULT_CHUNK_SIZE,
         totalChunks,
         isFolder,
-        folderName,
+        folderName: isFolder ? fileName : undefined,
+        totalFiles: transfer.totalFiles,
       },
     });
 
@@ -239,20 +245,22 @@ export class TransferManager extends EventEmitter {
   }
 
   private handleTransferAccept(payload: Record<string, any>): void {
-    const { transferId, startChunkIndex } = payload;
+    const { transferId } = payload;
     const session = this.outboundSessions.get(transferId);
     if (!session) return;
 
     session.transfer.status = 'transferring';
-    session.nextChunkToSend = typeof startChunkIndex === 'number' ? startChunkIndex : 0;
-    session.acknowledgedCount = session.nextChunkToSend;
     session.lastProgressTime = Date.now();
     session.lastTransferredBytes = session.transfer.transferred;
 
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
-    this.streamOutboundPipelined(session);
+    if (session.isFolder && session.fileEntries) {
+      this.streamOutboundDirectory(session);
+    } else {
+      this.streamOutboundSingleFile(session);
+    }
   }
 
   private handleTransferReject(payload: Record<string, any>): void {
@@ -265,37 +273,155 @@ export class TransferManager extends EventEmitter {
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
-    if (session.isTempFile) {
-      try { fs.unlinkSync(session.filePath); } catch {}
-    }
     this.outboundSessions.delete(transferId);
   }
 
   /**
-   * Pipelined chunk streaming with sliding window:
-   * Keeps up to MAX_PIPELINE_WINDOW chunks in flight to saturate LAN bandwidth (300+ MB/s).
+   * Direct Multi-File Directory Streaming:
+   * Iterates through files, sends FILE_START, streams chunks with pipelining, sends FILE_COMPLETE.
+   * Zero zip/tar archive creation. Zero disk duplication.
    */
-  private async streamOutboundPipelined(session: OutboundTransferSession): Promise<void> {
-    const { transfer, filePath } = session;
+  private async streamOutboundDirectory(session: OutboundTransferSession): Promise<void> {
+    const { transfer, fileEntries } = session;
+    if (!fileEntries) return;
+
+    let globalChunkIndex = 0;
+
+    for (let i = 0; i < fileEntries.length; i++) {
+      if (session.cancelled) break;
+
+      const file = fileEntries[i];
+      session.transfer.currentFileName = file.relPath;
+      this.emit('transfer_updated', session.transfer);
+
+      // 1. Notify receiver of file start
+      this.network.sendMessage(transfer.destinationDeviceId, {
+        type: 'FILE_START',
+        payload: {
+          transferId: transfer.id,
+          fileIndex: i,
+          relPath: file.relPath,
+          fileSize: file.size,
+        },
+      });
+
+      // Handle 0-byte files
+      if (file.size === 0) {
+        session.transfer.completedFiles = (session.transfer.completedFiles || 0) + 1;
+        this.emit('transfer_updated', session.transfer);
+        this.network.sendMessage(transfer.destinationDeviceId, {
+          type: 'FILE_COMPLETE',
+          payload: { transferId: transfer.id, fileIndex: i, relPath: file.relPath },
+        });
+        continue;
+      }
+
+      // Stream file chunks with sliding-window pipelining
+      const fileTotalChunks = Math.ceil(file.size / transfer.chunkSize);
+      let fileChunkIndex = 0;
+
+      while (fileChunkIndex < fileTotalChunks && !session.paused && !session.cancelled) {
+        // Dispatch while window has room
+        while (
+          session.inFlightChunks.size < MAX_PIPELINE_WINDOW &&
+          fileChunkIndex < fileTotalChunks &&
+          !session.paused &&
+          !session.cancelled
+        ) {
+          const chunkInFile = fileChunkIndex;
+          const currentGlobalChunk = globalChunkIndex;
+          fileChunkIndex++;
+          globalChunkIndex++;
+          session.inFlightChunks.add(currentGlobalChunk);
+
+          const start = chunkInFile * transfer.chunkSize;
+          const end = Math.min(start + transfer.chunkSize - 1, file.size - 1);
+          const currentChunkSize = end - start + 1;
+
+          const chunkBuffer = await this.readChunkStream(file.fullPath, start, end);
+
+          const chunkFrame = encodeChunk(
+            {
+              transferId: transfer.id,
+              chunkIndex: currentGlobalChunk,
+              chunkSize: currentChunkSize,
+            },
+            chunkBuffer
+          );
+
+          this.network.sendChunk(transfer.destinationDeviceId, chunkFrame);
+        }
+
+        // Wait for ACK if window is full
+        if (session.inFlightChunks.size >= MAX_PIPELINE_WINDOW || fileChunkIndex >= fileTotalChunks) {
+          if (session.inFlightChunks.size > 0) {
+            await new Promise<void>((resolve) => {
+              session.pipelineResolver = resolve;
+            });
+          }
+        }
+      }
+
+      // 2. Notify receiver of file complete
+      session.transfer.completedFiles = (session.transfer.completedFiles || 0) + 1;
+      this.emit('transfer_updated', session.transfer);
+
+      this.network.sendMessage(transfer.destinationDeviceId, {
+        type: 'FILE_COMPLETE',
+        payload: {
+          transferId: transfer.id,
+          fileIndex: i,
+          relPath: file.relPath,
+        },
+      });
+
+      // Yield event loop briefly to keep UI at 60 FPS
+      await new Promise((r) => setImmediate(r));
+    }
+
+    if (!session.cancelled) {
+      transfer.status = 'completed';
+      transfer.transferred = transfer.size;
+      transfer.speed = undefined;
+      transfer.eta = undefined;
+      transfer.updatedAt = Date.now();
+      this.db.saveTransfer(transfer);
+      this.emit('transfer_updated', transfer);
+
+      // Send TRANSFER_COMPLETE
+      this.network.sendMessage(transfer.destinationDeviceId, {
+        type: 'TRANSFER_COMPLETE',
+        payload: { transferId: transfer.id },
+      });
+
+      this.outboundSessions.delete(transfer.id);
+    }
+  }
+
+  /**
+   * Direct Single File Streaming:
+   * Streams chunks directly from disk with sliding-window pipelining.
+   */
+  private async streamOutboundSingleFile(session: OutboundTransferSession): Promise<void> {
+    const { transfer, sourcePath } = session;
+    let nextChunk = 0;
 
     while (session.acknowledgedCount < transfer.totalChunks && !session.paused && !session.cancelled) {
-      // While window has space, dispatch chunks into the TCP socket
       while (
         session.inFlightChunks.size < MAX_PIPELINE_WINDOW &&
-        session.nextChunkToSend < transfer.totalChunks &&
+        nextChunk < transfer.totalChunks &&
         !session.paused &&
         !session.cancelled
       ) {
-        const chunkIndex = session.nextChunkToSend;
-        session.nextChunkToSend++;
+        const chunkIndex = nextChunk;
+        nextChunk++;
         session.inFlightChunks.add(chunkIndex);
 
         const start = chunkIndex * transfer.chunkSize;
         const end = Math.min(start + transfer.chunkSize - 1, transfer.size - 1);
         const currentChunkSize = transfer.size === 0 ? 0 : end - start + 1;
 
-        // Zero-copy chunk stream read directly from disk
-        const chunkBuffer = await this.readChunkStream(filePath, start, end);
+        const chunkBuffer = await this.readChunkStream(sourcePath, start, end);
 
         const chunkFrame = encodeChunk(
           {
@@ -309,8 +435,7 @@ export class TransferManager extends EventEmitter {
         this.network.sendChunk(transfer.destinationDeviceId, chunkFrame);
       }
 
-      // If window is full or all chunks dispatched, wait for next ACK
-      if (session.inFlightChunks.size >= MAX_PIPELINE_WINDOW || session.nextChunkToSend >= transfer.totalChunks) {
+      if (session.inFlightChunks.size >= MAX_PIPELINE_WINDOW || nextChunk >= transfer.totalChunks) {
         if (session.acknowledgedCount < transfer.totalChunks) {
           await new Promise<void>((resolve) => {
             session.pipelineResolver = resolve;
@@ -328,17 +453,11 @@ export class TransferManager extends EventEmitter {
       this.db.saveTransfer(transfer);
       this.emit('transfer_updated', transfer);
 
-      // Send TRANSFER_COMPLETE
       this.network.sendMessage(transfer.destinationDeviceId, {
         type: 'TRANSFER_COMPLETE',
-        payload: {
-          transferId: transfer.id,
-        },
+        payload: { transferId: transfer.id },
       });
 
-      if (session.isTempFile) {
-        try { fs.unlinkSync(session.filePath); } catch {}
-      }
       this.outboundSessions.delete(transfer.id);
     }
   }
@@ -392,7 +511,7 @@ export class TransferManager extends EventEmitter {
   // --- Inbound Transfers (Receiver) ---
 
   private handleTransferRequest(deviceId: string | null, payload: Record<string, any>): void {
-    const { transferId, fileName, fileSize, chunkSize, totalChunks, isFolder, folderName } = payload;
+    const { transferId, fileName, fileSize, chunkSize, totalChunks, isFolder, folderName, totalFiles } = payload;
 
     const sender = deviceId ? this.network.getDevice(deviceId) : null;
     if (!sender || !sender.trusted) {
@@ -406,10 +525,21 @@ export class TransferManager extends EventEmitter {
     }
 
     const local = this.network.getLocalInfo();
-    const finalPath = getUniqueFilePath(this.downloadDir, fileName);
-    const partPath = `${finalPath}.part`;
+    let finalPath = '';
+    let targetFolder: string | undefined;
+    let partPath: string | undefined;
+    let currentFd: number | undefined;
 
-    const fd = fs.openSync(partPath, 'w+');
+    if (isFolder) {
+      // Direct directory creation
+      targetFolder = getUniqueFilePath(this.downloadDir, folderName || fileName);
+      fs.mkdirSync(targetFolder, { recursive: true });
+      finalPath = targetFolder;
+    } else {
+      finalPath = getUniqueFilePath(this.downloadDir, fileName);
+      partPath = `${finalPath}.part`;
+      currentFd = fs.openSync(partPath, 'w+');
+    }
 
     const transfer: Transfer = {
       id: transferId,
@@ -424,7 +554,9 @@ export class TransferManager extends EventEmitter {
       totalChunks: totalChunks || 1,
       status: 'transferring',
       isFolder: !!isFolder,
-      folderName,
+      folderName: isFolder ? path.basename(finalPath) : undefined,
+      totalFiles: totalFiles || (isFolder ? 1 : 1),
+      completedFiles: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -434,9 +566,10 @@ export class TransferManager extends EventEmitter {
 
     this.inboundSessions.set(transferId, {
       transfer,
+      targetFolder,
       partPath,
       finalPath,
-      fd,
+      currentFd,
       completedCount: 0,
       lastProgressTime: Date.now(),
       lastTransferredBytes: 0,
@@ -445,11 +578,41 @@ export class TransferManager extends EventEmitter {
     // Accept transfer
     this.network.sendMessage(sender.id, {
       type: 'TRANSFER_ACCEPT',
-      payload: {
-        transferId,
-        startChunkIndex: 0,
-      },
+      payload: { transferId },
     });
+  }
+
+  private handleFileStart(payload: FileStartPayload): void {
+    const { transferId, relPath } = payload;
+    const session = this.inboundSessions.get(transferId);
+    if (!session || !session.targetFolder) return;
+
+    // Close previous descriptor if open
+    if (session.currentFd !== undefined) {
+      try { fs.closeSync(session.currentFd); } catch {}
+      session.currentFd = undefined;
+    }
+
+    const destFilePath = path.join(session.targetFolder, relPath);
+    fs.mkdirSync(path.dirname(destFilePath), { recursive: true });
+
+    session.currentFd = fs.openSync(destFilePath, 'w+');
+    session.transfer.currentFileName = relPath;
+    this.emit('transfer_updated', session.transfer);
+  }
+
+  private handleFileComplete(payload: Record<string, any>): void {
+    const { transferId } = payload;
+    const session = this.inboundSessions.get(transferId);
+    if (!session) return;
+
+    if (session.currentFd !== undefined) {
+      try { fs.closeSync(session.currentFd); } catch {}
+      session.currentFd = undefined;
+    }
+
+    session.transfer.completedFiles = (session.transfer.completedFiles || 0) + 1;
+    this.emit('transfer_updated', session.transfer);
   }
 
   private handleInboundChunk(deviceId: string | null, chunkMsg: ChunkMessage): void {
@@ -457,23 +620,19 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(header.transferId);
     if (!session) return;
 
-    // Fast direct write into open file descriptor
-    const offset = header.chunkIndex * session.transfer.chunkSize;
-    if (data.length > 0) {
-      fs.writeSync(session.fd, data, 0, data.length, offset);
+    // Direct write into current open file descriptor (whether single file or inside folder)
+    if (session.currentFd !== undefined && data.length > 0) {
+      // In folder transfer, chunks are written sequentially to the current file
+      fs.writeSync(session.currentFd, data);
     }
 
     this.db.markChunkCompleted(header.transferId, header.chunkIndex);
     session.completedCount++;
     session.transfer.transferred = Math.min(
       session.transfer.size,
-      session.completedCount * session.transfer.chunkSize
+      session.transfer.transferred + data.length
     );
-    if (session.transfer.size === 0) {
-      session.transfer.transferred = 0;
-    }
 
-    // High-precision speed & ETA computation over 250ms window
     const now = Date.now();
     const timeDelta = (now - session.lastProgressTime) / 1000;
     if (timeDelta >= 0.25) {
@@ -489,7 +648,7 @@ export class TransferManager extends EventEmitter {
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
-    // Send ACK immediately to advance sliding window
+    // Send ACK back to sender
     const targetDevId = deviceId || session.transfer.sourceDeviceId;
     this.network.sendMessage(targetDevId, {
       type: 'CHUNK_ACK',
@@ -505,31 +664,22 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(transferId);
     if (!session) return;
 
-    try {
-      fs.closeSync(session.fd);
-    } catch {}
-
-    // Rename .part to final destination
-    if (fs.existsSync(session.partPath)) {
-      fs.renameSync(session.partPath, session.finalPath);
+    // Close descriptor
+    if (session.currentFd !== undefined) {
+      try { fs.closeSync(session.currentFd); } catch {}
+      session.currentFd = undefined;
     }
 
-    // Auto-extract folder if this was an auto-archived folder
-    if (session.transfer.isFolder && session.transfer.folderName) {
-      try {
-        const extractTarget = getUniqueFilePath(this.downloadDir, session.transfer.folderName);
-        await extractTarArchive(session.finalPath, extractTarget);
-        try { fs.unlinkSync(session.finalPath); } catch {}
-        session.transfer.fileName = path.basename(extractTarget);
-      } catch (err) {
-        console.log(`[WARN] Failed to auto-extract folder: ${(err as Error).message}`);
-      }
+    // If single file, rename .part to final
+    if (session.partPath && fs.existsSync(session.partPath)) {
+      fs.renameSync(session.partPath, session.finalPath);
     }
 
     session.transfer.status = 'completed';
     session.transfer.transferred = session.transfer.size;
     session.transfer.speed = undefined;
     session.transfer.eta = undefined;
+    session.transfer.currentFileName = undefined;
     session.transfer.updatedAt = Date.now();
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
@@ -573,7 +723,11 @@ export class TransferManager extends EventEmitter {
         payload: { transferId },
       });
 
-      this.streamOutboundPipelined(outSession);
+      if (outSession.isFolder) {
+        this.streamOutboundDirectory(outSession);
+      } else {
+        this.streamOutboundSingleFile(outSession);
+      }
     }
   }
 
@@ -593,16 +747,19 @@ export class TransferManager extends EventEmitter {
         payload: { transferId },
       });
 
-      if (outSession.isTempFile) {
-        try { fs.unlinkSync(outSession.filePath); } catch {}
-      }
       this.outboundSessions.delete(transferId);
     }
 
     const inSession = this.inboundSessions.get(transferId);
     if (inSession) {
-      try { fs.closeSync(inSession.fd); } catch {}
-      try { if (fs.existsSync(inSession.partPath)) fs.unlinkSync(inSession.partPath); } catch {}
+      if (inSession.currentFd !== undefined) {
+        try { fs.closeSync(inSession.currentFd); } catch {}
+      }
+      try {
+        if (inSession.partPath && fs.existsSync(inSession.partPath)) {
+          fs.unlinkSync(inSession.partPath);
+        }
+      } catch {}
 
       inSession.transfer.status = 'cancelled';
       inSession.transfer.speed = undefined;
@@ -643,8 +800,14 @@ export class TransferManager extends EventEmitter {
     const { transferId } = payload;
     const session = this.inboundSessions.get(transferId);
     if (session) {
-      try { fs.closeSync(session.fd); } catch {}
-      try { if (fs.existsSync(session.partPath)) fs.unlinkSync(session.partPath); } catch {}
+      if (session.currentFd !== undefined) {
+        try { fs.closeSync(session.currentFd); } catch {}
+      }
+      try {
+        if (session.partPath && fs.existsSync(session.partPath)) {
+          fs.unlinkSync(session.partPath);
+        }
+      } catch {}
       session.transfer.status = 'cancelled';
       session.transfer.speed = undefined;
       session.transfer.eta = undefined;

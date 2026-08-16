@@ -106,11 +106,17 @@ export const TransferSection: React.FC<TransferSectionProps> = ({
                     <strong>{formatBytes(tx.transferred)}</strong> of {formatBytes(tx.size)} ({percent}%)
                     {tx.speed && tx.status === 'transferring' ? ` • ⚡ ${formatBytes(tx.speed)}/s` : ''}
                     {etaStr && tx.status === 'transferring' ? ` • ⏳ ${etaStr}` : ''}
+                    {tx.isFolder && tx.totalFiles && tx.totalFiles > 1 ? ` • (${tx.completedFiles || 0}/${tx.totalFiles} files)` : ''}
                   </span>
                   <span style={{ fontSize: '0.72rem' }}>
                     {tx.sourceDeviceName} ➔ {tx.destinationDeviceName}
                   </span>
                 </div>
+                {tx.currentFileName && tx.status === 'transferring' && (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    Writing: <code style={{ color: 'var(--accent)' }}>{tx.currentFileName}</code>
+                  </div>
+                )}
               </div>
             );
           })}

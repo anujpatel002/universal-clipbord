@@ -56,6 +56,9 @@ export interface Transfer {
   status: TransferStatus;
   isFolder?: boolean;
   folderName?: string;
+  currentFileName?: string;
+  totalFiles?: number;
+  completedFiles?: number;
   speed?: number; // bytes/sec
   eta?: number;   // estimated seconds remaining
   error?: string;
@@ -75,6 +78,8 @@ export type MessageType =
   | 'TRANSFER_REQUEST'
   | 'TRANSFER_ACCEPT'
   | 'TRANSFER_REJECT'
+  | 'FILE_START'
+  | 'FILE_COMPLETE'
   | 'CHUNK'
   | 'CHUNK_ACK'
   | 'TRANSFER_PAUSE'
@@ -86,6 +91,13 @@ export type MessageType =
   | 'SCREEN_SHARE_ICE'
   | 'SCREEN_SHARE_STOP'
   | 'ERROR';
+
+export interface FileStartPayload {
+  transferId: string;
+  fileIndex: number;
+  relPath: string;
+  fileSize: number;
+}
 
 export interface HelloPayload {
   deviceId: string;
