@@ -1,0 +1,69 @@
+{
+  "name": "multiclip",
+  "version": "1.0.0",
+  "description": "Multi-PC Universal Clipboard & Large File Transfer",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build:main": "esbuild src/main/index.ts src/main/preload.ts --bundle --platform=node --target=node22 --outdir=dist/main --external:electron --external:bonjour-service --external:sql.js",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "dist:win": "npm run build && electron-builder --win --dir",
+    "dist:exe": "npm run build && electron-builder --win portable",
+    "dist:installer": "npm run build && electron-builder --win nsis",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts"
+  },
+  "build": {
+    "appId": "com.multiclip.app",
+    "productName": "MultiClip",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/bonjour-service/**/*",
+      "node_modules/sql.js/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "keywords": [
+    "clipboard",
+    "file-transfer",
+    "lan",
+    "p2p",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/sql.js": "^1.4.11",
+    "bonjour-service": "^1.3.0",
+    "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.1.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
