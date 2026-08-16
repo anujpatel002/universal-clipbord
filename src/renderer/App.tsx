@@ -11,7 +11,10 @@ import { ClipboardSection } from './components/ClipboardSection.js';
 import { TransferSection } from './components/TransferSection.js';
 import { PairingModal } from './components/PairingModal.js';
 
+type TabType = 'devices' | 'clipboard' | 'transfers' | 'settings';
+
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<TabType>('devices');
   const [localInfo, setLocalInfo] = useState<LocalDeviceInfo | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [clipboardItems, setClipboardItems] = useState<ClipboardItem[]>([]);
@@ -95,11 +98,13 @@ export const App: React.FC = () => {
     }
     if (targetPath) {
       await window.multiclip?.initiateFileTransfer(deviceId, targetPath);
+      setActiveTab('transfers');
     }
   };
 
   const handleRequestFile = async (sourceDeviceId: string, remoteFilePath: string) => {
     await window.multiclip?.requestFileFromPeer(sourceDeviceId, remoteFilePath);
+    setActiveTab('transfers');
   };
 
   const handlePauseTransfer = async (transferId: string) => {
@@ -119,16 +124,57 @@ export const App: React.FC = () => {
     setClipboardItems([]);
   };
 
+  const onlineDevicesCount = devices.filter((d) => d.status === 'online').length;
+  const activeTransfersCount = transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').length;
+
   return (
     <div className="app-container">
+      {/* App Header */}
       <header className="app-header">
-        <div className="logo">
-          MultiClip
-          <span className="logo-badge">P2P Encrypted</span>
+        <div className="header-left">
+          <div className="logo-group">
+            <span className="logo-icon">📋</span>
+            <span className="logo-title">MultiClip</span>
+          </div>
+          <div className="status-badge">
+            <div className="status-dot" />
+            <span>{onlineDevicesCount > 0 ? `${onlineDevicesCount} Peer${onlineDevicesCount > 1 ? 's' : ''} Online` : 'Ready on LAN'}</span>
+          </div>
         </div>
+
+        {/* Tab Navigation */}
+        <nav className="nav-tabs">
+          <button
+            className={`nav-tab ${activeTab === 'devices' ? 'active' : ''}`}
+            onClick={() => setActiveTab('devices')}
+          >
+            💻 Devices
+            {onlineDevicesCount > 0 && <span className="tab-badge">{onlineDevicesCount}</span>}
+          </button>
+          <button
+            className={`nav-tab ${activeTab === 'clipboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('clipboard')}
+          >
+            📋 Clipboard
+            {clipboardItems.length > 0 && <span className="tab-badge">{clipboardItems.length}</span>}
+          </button>
+          <button
+            className={`nav-tab ${activeTab === 'transfers' ? 'active' : ''}`}
+            onClick={() => setActiveTab('transfers')}
+          >
+            🚀 Transfers
+            {activeTransfersCount > 0 && <span className="tab-badge" style={{ background: 'var(--accent)' }}>{activeTransfersCount}</span>}
+          </button>
+          <button
+            className={`nav-tab ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            ⚙️ Info
+          </button>
+        </nav>
       </header>
 
-      {/* Pending Incoming Pairing Requests */}
+      {/* Pending Incoming Pairing Modal / Notification */}
       {pendingPairRequests.map((req) => (
         <PairingModal
           key={req.deviceId}
@@ -138,39 +184,101 @@ export const App: React.FC = () => {
         />
       ))}
 
+      {/* Local PC Status Card */}
       <div className="local-pc-card">
-        <div className="local-pc-info">
-          <h2>This PC</h2>
-          <div className="local-pc-name">{localInfo?.name || 'Loading...'}</div>
-          <div className="local-pc-ip">
-            {localInfo?.ip}:{localInfo?.port} &bull; ID: {localInfo?.id.slice(0, 8)}
+        <div className="local-pc-left">
+          <div className="device-avatar">🖥️</div>
+          <div className="local-pc-details">
+            <h3>{localInfo?.name || 'This Computer'} (Local)</h3>
+            <div className="local-pc-ip">
+              IP: {localInfo?.ip}:{localInfo?.port} &bull; Device ID: {localInfo?.id.slice(0, 8)}
+            </div>
           </div>
+        </div>
+        <div className="btn-group">
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            Auto-Sync: <strong style={{ color: 'var(--success)' }}>Active</strong>
+          </span>
         </div>
       </div>
 
-      <DeviceList
-        devices={devices}
-        onPair={handlePair}
-        onUnpair={handleUnpair}
-        onSendFile={handleSendFile}
-      />
+      {/* Main Tab Content */}
+      <main className="main-content-area">
+        {activeTab === 'devices' && (
+          <>
+            <DeviceList
+              devices={devices}
+              onPair={handlePair}
+              onUnpair={handleUnpair}
+              onSendFile={handleSendFile}
+            />
+            <ClipboardSection
+              items={clipboardItems.slice(0, 5)}
+              devices={devices}
+              onBroadcastText={handleBroadcastText}
+              onSendToDevice={handleSendToDevice}
+              onCopyToClipboard={handleCopyToClipboard}
+              onRequestFile={handleRequestFile}
+              onClearHistory={handleClearHistory}
+            />
+          </>
+        )}
 
-      <ClipboardSection
-        items={clipboardItems}
-        devices={devices}
-        onBroadcastText={handleBroadcastText}
-        onSendToDevice={handleSendToDevice}
-        onCopyToClipboard={handleCopyToClipboard}
-        onRequestFile={handleRequestFile}
-        onClearHistory={handleClearHistory}
-      />
+        {activeTab === 'clipboard' && (
+          <ClipboardSection
+            items={clipboardItems}
+            devices={devices}
+            onBroadcastText={handleBroadcastText}
+            onSendToDevice={handleSendToDevice}
+            onCopyToClipboard={handleCopyToClipboard}
+            onRequestFile={handleRequestFile}
+            onClearHistory={handleClearHistory}
+          />
+        )}
 
-      <TransferSection
-        transfers={transfers}
-        onPause={handlePauseTransfer}
-        onResume={handleResumeTransfer}
-        onCancel={handleCancelTransfer}
-      />
+        {activeTab === 'transfers' && (
+          <TransferSection
+            transfers={transfers}
+            onPause={handlePauseTransfer}
+            onResume={handleResumeTransfer}
+            onCancel={handleCancelTransfer}
+          />
+        )}
+
+        {activeTab === 'settings' && (
+          <div className="section-card">
+            <div className="section-title">
+              <span>MultiClip Architecture & Network Diagnostics</span>
+            </div>
+            <div className="settings-grid">
+              <div className="settings-item">
+                <span className="settings-label">Device Name</span>
+                <span className="settings-value">{localInfo?.name || 'Local'}</span>
+              </div>
+              <div className="settings-item">
+                <span className="settings-label">Primary IP Address</span>
+                <span className="settings-value">{localInfo?.ip}:{localInfo?.port}</span>
+              </div>
+              <div className="settings-item">
+                <span className="settings-label">P2P Device UUID</span>
+                <span className="settings-value">{localInfo?.id}</span>
+              </div>
+              <div className="settings-item">
+                <span className="settings-label">Version</span>
+                <span className="settings-value">MultiClip v{localInfo?.version || '1.0.0'} (P2P + SQLite)</span>
+              </div>
+              <div className="settings-item">
+                <span className="settings-label">Discovery Engines</span>
+                <span className="settings-value">TCP Subnet Sweeper + mDNS + UDP Broadcast</span>
+              </div>
+              <div className="settings-item">
+                <span className="settings-label">Security & Encryption</span>
+                <span className="settings-value">Ed25519 Signatures + AES-256-GCM Trust</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 };

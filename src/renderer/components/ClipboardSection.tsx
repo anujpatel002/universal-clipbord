@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ClipboardItem, Device } from '../../shared/types.js';
 
 interface ClipboardSectionProps {
@@ -21,6 +21,8 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
   onClearHistory,
 }) => {
   const [inputText, setInputText] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState<'all' | 'text' | 'file'>('all');
   const [selectedTarget, setSelectedTarget] = useState<string>('broadcast');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -29,7 +31,7 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
   const handleSend = (e: React.FormEvent) => {
@@ -56,7 +58,7 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
     if (item.content) {
       onCopyToClipboard(item.content);
       setCopiedId(item.id);
-      setTimeout(() => setCopiedId(null), 2000);
+      setTimeout(() => setCopiedId(null), 1800);
     }
   };
 
@@ -67,20 +69,35 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
 
   const trustedDevices = devices.filter((d) => d.trusted);
 
+  // Filtered items
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      // Type filter
+      if (filterType !== 'all' && item.type !== filterType) return false;
+      // Search query filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const textMatch = item.content?.toLowerCase().includes(q);
+        const nameMatch = item.name?.toLowerCase().includes(q);
+        const srcMatch = item.sourceDeviceName?.toLowerCase().includes(q);
+        return textMatch || nameMatch || srcMatch;
+      }
+      return true;
+    });
+  }, [items, filterType, searchQuery]);
+
   return (
     <div className="section-card">
       <div className="section-title">
         <span>Clipboard Activity & Sync</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{items.length} items</span>
+        <div className="btn-group">
           {items.length > 0 && (
             <button
               className="btn btn-sm btn-secondary"
               onClick={onClearHistory}
-              style={{ fontSize: '0.75rem', padding: '2px 8px' }}
-              title="Clear local clipboard history list"
+              title="Clear all clipboard history entries"
             >
-              Clear History
+              🗑️ Clear History
             </button>
           )}
         </div>
@@ -91,7 +108,7 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
         <input
           type="text"
           className="text-input"
-          placeholder="Type or paste text to share across LAN..."
+          placeholder="Type or paste text to broadcast instantly to all PCs..."
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
         />
@@ -100,7 +117,7 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
           value={selectedTarget}
           onChange={(e) => setSelectedTarget(e.target.value)}
         >
-          <option value="broadcast">All Trusted ({trustedDevices.length})</option>
+          <option value="broadcast">📢 All Trusted ({trustedDevices.length})</option>
           {devices.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name} {d.trusted ? '(Trusted)' : '(Untrusted)'}
@@ -112,48 +129,87 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
         </button>
       </form>
 
+      {/* Filter & Search Toolbar */}
+      {items.length > 0 && (
+        <div className="clipboard-toolbar">
+          <input
+            type="text"
+            className="search-input"
+            placeholder="🔍 Search clipboard history..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          <div className="btn-group">
+            <button
+              className={`btn btn-sm ${filterType === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilterType('all')}
+            >
+              All
+            </button>
+            <button
+              className={`btn btn-sm ${filterType === 'text' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilterType('text')}
+            >
+              📝 Text
+            </button>
+            <button
+              className={`btn btn-sm ${filterType === 'file' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilterType('file')}
+            >
+              📁 Files/Folders
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Clipboard History List */}
       <div className="clipboard-list">
-        {items.length === 0 ? (
-          <div className="empty-state">No clipboard items synced yet. Copy text or files to share automatically.</div>
+        {filteredItems.length === 0 ? (
+          <div className="empty-placeholder">
+            <div className="empty-icon">📋</div>
+            <div>No clipboard items match your search.</div>
+            <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>
+              Copy text or files (<kbd>Ctrl</kbd> + <kbd>C</kbd>) on any paired PC to sync automatically.
+            </div>
+          </div>
         ) : (
-          items.map((item) => (
-            <div key={item.id} className="clipboard-item">
-              <div className="clipboard-content-group">
-                <div className="clipboard-header-row">
-                  <span className={`badge-tag ${item.type === 'file' ? 'badge-file' : ''}`}>
-                    [{item.type.toUpperCase()}]
+          filteredItems.map((item) => (
+            <div key={item.id} className="clipboard-card">
+              <div className="clipboard-meta-group">
+                <div className="clipboard-tags">
+                  <span className={`tag-badge ${item.type === 'file' ? 'tag-file' : 'tag-text'}`}>
+                    {item.isFolder ? 'FOLDER' : item.type.toUpperCase()}
                   </span>
-                  <span className="source-device">{item.sourceDeviceName}</span>
-                  <span className="time-text">{formatTime(item.timestamp)}</span>
+                  <span className="source-text">From {item.sourceDeviceName}</span>
+                  <span className="time-text">• {formatTime(item.timestamp)}</span>
                 </div>
-                <div className="clipboard-body-text">
+                <div className="clipboard-body-content">
                   {item.type === 'file' ? (
                     <span>
-                      📁 <strong>{item.name}</strong> ({formatBytes(item.size || 0)})
+                      {item.isFolder ? '📂' : '📄'} <strong>{item.name}</strong> ({formatBytes(item.size || 0)})
                     </span>
                   ) : (
-                    item.content || 'Untitled item'
+                    item.content
                   )}
                 </div>
               </div>
 
-              <div className="clipboard-actions">
+              <div className="btn-group">
                 {item.type === 'text' && item.content && (
                   <button
                     className={`btn btn-sm ${copiedId === item.id ? 'btn-success' : 'btn-secondary'}`}
                     onClick={() => handleCopy(item)}
                   >
-                    {copiedId === item.id ? '✓ Copied' : 'Copy'}
+                    {copiedId === item.id ? '✓ Copied!' : '📋 Copy'}
                   </button>
                 )}
                 {item.type === 'file' && item.path && (
                   <button
                     className="btn btn-sm btn-secondary"
                     onClick={() => onRequestFile(item.sourceDeviceId, item.path!)}
-                    title="Download/Paste file from remote PC"
+                    title="Download/Sync file to this PC"
                   >
-                    Download File
+                    📥 Download
                   </button>
                 )}
               </div>

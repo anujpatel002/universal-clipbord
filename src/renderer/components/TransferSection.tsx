@@ -15,81 +15,97 @@ export const TransferSection: React.FC<TransferSectionProps> = ({
   onCancel,
 }) => {
   const formatBytes = (bytes: number): string => {
-    if (!bytes || bytes === 0) return '0 B';
+    if (!bytes) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
+
+  const activeTransfers = transfers.filter((t) => t.status === 'transferring' || t.status === 'paused');
 
   return (
     <div className="section-card">
       <div className="section-title">
-        <span>Large File Transfers (Resumable Streaming)</span>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-          {transfers.filter((t) => t.status === 'transferring').length} active
+        <span>File & Folder Transfers ({transfers.length})</span>
+        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          {activeTransfers.length} active
         </span>
       </div>
 
-      <div className="transfer-list">
-        {transfers.length === 0 ? (
-          <div className="empty-state">No active or past transfers. Drop a file on a device to start.</div>
-        ) : (
-          transfers.map((t) => {
-            const percent = t.size > 0 ? Math.min(100, Math.round((t.transferred / t.size) * 100)) : 0;
-            const isOutbound = t.sourceDeviceId === 'local' || !t.sourceDeviceName.includes('Remote');
+      {transfers.length === 0 ? (
+        <div className="empty-placeholder">
+          <div className="empty-icon">🚀</div>
+          <div>No active or past transfers.</div>
+          <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>
+            Drag and drop files/folders onto a device or copy them in File Explorer.
+          </div>
+        </div>
+      ) : (
+        <div className="transfer-list">
+          {transfers.map((tx) => {
+            const percent = tx.size > 0 ? Math.min(100, Math.round((tx.transferred / tx.size) * 100)) : 100;
 
             return (
-              <div key={t.id} className={`transfer-item status-${t.status}`}>
-                <div className="transfer-header">
-                  <div className="transfer-name-box">
-                    <span className="file-icon">📄</span>
-                    <strong>{t.fileName}</strong>
-                    <span className={`status-pill ${t.status}`}>{t.status}</span>
+              <div key={tx.id} className="transfer-card">
+                <div className="transfer-top-row">
+                  <div className="transfer-name">
+                    <span>{tx.isFolder ? '📂' : '📄'}</span>
+                    <span>{tx.fileName}</span>
                   </div>
-
-                  <div className="transfer-btn-group">
-                    {t.status === 'transferring' && (
-                      <button className="btn btn-sm btn-secondary" onClick={() => onPause(t.id)}>
-                        Pause
+                  <div className="btn-group">
+                    <span className={`status-pill ${tx.status}`}>{tx.status}</span>
+                    {tx.status === 'transferring' && (
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => onPause(tx.id)}
+                        title="Pause transfer"
+                      >
+                        ⏸️ Pause
                       </button>
                     )}
-                    {t.status === 'paused' && (
-                      <button className="btn btn-sm btn-secondary" onClick={() => onResume(t.id)}>
-                        Resume
+                    {tx.status === 'paused' && (
+                      <button
+                        className="btn btn-sm btn-primary"
+                        onClick={() => onResume(tx.id)}
+                        title="Resume transfer"
+                      >
+                        ▶️ Resume
                       </button>
                     )}
-                    {(t.status === 'transferring' || t.status === 'paused' || t.status === 'pending') && (
-                      <button className="btn btn-sm btn-danger" onClick={() => onCancel(t.id)}>
-                        Cancel
+                    {(tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'pending') && (
+                      <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => onCancel(tx.id)}
+                        title="Cancel transfer"
+                      >
+                        ✕ Cancel
                       </button>
                     )}
                   </div>
                 </div>
 
-                <div className="transfer-stats-row">
-                  <span>
-                    {formatBytes(t.transferred)} / {formatBytes(t.size)} ({percent}%)
-                  </span>
-                  {t.speed && t.status === 'transferring' && (
-                    <span className="speed-text">{formatBytes(t.speed)}/s</span>
-                  )}
-                  <span className="peer-text">
-                    {isOutbound ? `To: ${t.destinationDeviceName}` : `From: ${t.sourceDeviceName}`}
-                  </span>
-                </div>
-
-                <div className="progress-bar-bg">
+                <div className="progress-track">
                   <div
-                    className={`progress-bar-fill ${t.status}`}
+                    className={`progress-fill ${tx.status}`}
                     style={{ width: `${percent}%` }}
                   />
                 </div>
+
+                <div className="transfer-stats">
+                  <span>
+                    {formatBytes(tx.transferred)} of {formatBytes(tx.size)} ({percent}%)
+                    {tx.speed && tx.status === 'transferring' ? ` • ${formatBytes(tx.speed)}/s` : ''}
+                  </span>
+                  <span style={{ fontSize: '0.72rem' }}>
+                    {tx.sourceDeviceName} ➔ {tx.destinationDeviceName}
+                  </span>
+                </div>
               </div>
             );
-          })
-        )}
-      </div>
+          })}
+        </div>
+      )}
     </div>
   );
 };
