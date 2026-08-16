@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 interface ScreenViewerProps {
-  stream: MediaStream;
+  stream: MediaStream | null;
   peerName: string;
   sourceName: string;
   quality: string;
@@ -18,13 +18,17 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((err) => {
-        console.log('[WARN] Video auto-play error:', err);
-      });
+      videoRef.current
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch((err) => {
+          console.log('[WARN] Video auto-play error:', err);
+        });
     }
 
     const handleFullscreenChange = () => {
@@ -69,7 +73,7 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
             <strong>{peerName}</strong> ({sourceName})
           </span>
           <span className="viewer-badge">{quality.toUpperCase()}</span>
-          <span className="viewer-badge-fps">⚡ Low Latency LAN Stream</span>
+          <span className="viewer-badge-fps">⚡ Low-Latency Direct LAN Stream</span>
         </div>
 
         <div className="btn-group">
@@ -99,9 +103,20 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
 
       {/* Video stream canvas */}
       <div className="video-container">
+        {!stream || !isPlaying ? (
+          <div className="empty-placeholder" style={{ color: '#fff' }}>
+            <div className="empty-icon">📡</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>Connecting to {peerName}...</div>
+            <div style={{ fontSize: '0.85rem', opacity: 0.8 }}>
+              Establishing direct 60 FPS hardware-accelerated video stream
+            </div>
+          </div>
+        ) : null}
+
         <video
           ref={videoRef}
           className="screen-video-player"
+          style={{ display: stream ? 'block' : 'none' }}
           autoPlay
           playsInline
           muted

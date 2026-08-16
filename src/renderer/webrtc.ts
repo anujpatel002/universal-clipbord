@@ -7,6 +7,7 @@ import {
 export class WebRTCManager {
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
   private localStreams: Map<string, MediaStream> = new Map();
+  private earlyIceCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
 
   /**
    * Captures screen or window stream using desktopCapturer media constraints
@@ -48,7 +49,6 @@ export class WebRTCManager {
     quality: '720p' | '1080p' | '4k',
     streamId: string = crypto.randomUUID()
   ): Promise<string> {
-    // Pure LAN connection: no external STUN needed because both PCs are on same local subnet
     const pc = new RTCPeerConnection({
       iceServers: [],
     });
@@ -85,7 +85,7 @@ export class WebRTCManager {
   }
 
   /**
-   * Receiver: Handles incoming offer, creates RTCPeerConnection, and sends SDP Answer
+   * Receiver: Handles incoming offer, creates RTCPeerConnection, drains early ICE candidates, and sends SDP Answer
    */
   public async handleOffer(
     sourceDeviceId: string,
@@ -117,6 +117,17 @@ export class WebRTCManager {
 
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
 
+    // Drain and apply any early ICE candidates received before accept
+    const earlyCandidates = this.earlyIceCandidates.get(streamId) || [];
+    for (const cand of earlyCandidates) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (err) {
+        console.log('[WARN] Error applying early ICE candidate:', err);
+      }
+    }
+    this.earlyIceCandidates.delete(streamId);
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
@@ -127,26 +138,41 @@ export class WebRTCManager {
   }
 
   /**
-   * Sender: Handles incoming SDP answer from receiver
+   * Sender: Handles incoming SDP answer from receiver and drains early ICE candidates
    */
   public async handleAnswer(payload: ScreenShareAnswerPayload): Promise<void> {
     const pc = this.peerConnections.get(payload.streamId);
     if (pc && pc.signalingState !== 'stable') {
       await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+
+      const earlyCandidates = this.earlyIceCandidates.get(payload.streamId) || [];
+      for (const cand of earlyCandidates) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (err) {
+          console.log('[WARN] Error applying early ICE candidate in answer:', err);
+        }
+      }
+      this.earlyIceCandidates.delete(payload.streamId);
     }
   }
 
   /**
-   * Handles incoming ICE candidate
+   * Handles incoming ICE candidate with buffering if connection not yet ready
    */
   public async handleIceCandidate(payload: ScreenShareIcePayload): Promise<void> {
     const pc = this.peerConnections.get(payload.streamId);
-    if (pc && payload.candidate) {
+    if (pc && pc.remoteDescription) {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
       } catch (err) {
         console.log('[WARN] ICE candidate error:', err);
       }
+    } else {
+      // Buffer candidate until remote description is set
+      const list = this.earlyIceCandidates.get(payload.streamId) || [];
+      list.push(payload.candidate);
+      this.earlyIceCandidates.set(payload.streamId, list);
     }
   }
 
@@ -165,6 +191,8 @@ export class WebRTCManager {
       pc.close();
       this.peerConnections.delete(streamId);
     }
+
+    this.earlyIceCandidates.delete(streamId);
 
     if (notifyPeer && targetDeviceId) {
       window.multiclip?.sendScreenShareStop(targetDeviceId, { streamId });

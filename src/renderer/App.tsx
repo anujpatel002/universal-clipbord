@@ -38,7 +38,7 @@ export const App: React.FC = () => {
     payload: ScreenShareOfferPayload;
   } | null>(null);
   const [activeViewerStream, setActiveViewerStream] = useState<{
-    stream: MediaStream;
+    stream: MediaStream | null;
     peerName: string;
     sourceName: string;
     quality: string;
@@ -198,19 +198,26 @@ export const App: React.FC = () => {
 
   const handleAcceptScreenShare = async () => {
     if (!incomingOffer) return;
-    const { sourceDeviceId, sourceDeviceName, payload } = incomingOffer;
+    const offer = incomingOffer;
     setIncomingOffer(null);
 
-    await webrtcRef.current.handleOffer(sourceDeviceId, payload, (remoteStream) => {
-      setActiveViewerStream({
-        stream: remoteStream,
-        peerName: sourceDeviceName,
-        sourceName: payload.sourceName,
-        quality: payload.quality,
-        streamId: payload.streamId,
-        sourceDeviceId,
-      });
+    // Immediately render viewer in connecting state with zero lag
+    setActiveViewerStream({
+      stream: null,
+      peerName: offer.sourceDeviceName,
+      sourceName: offer.payload.sourceName,
+      quality: offer.payload.quality,
+      streamId: offer.payload.streamId,
+      sourceDeviceId: offer.sourceDeviceId,
     });
+
+    try {
+      await webrtcRef.current.handleOffer(offer.sourceDeviceId, offer.payload, (remoteStream) => {
+        setActiveViewerStream((prev) => (prev ? { ...prev, stream: remoteStream } : null));
+      });
+    } catch (err) {
+      console.log('[WARN] Error accepting screen share:', err);
+    }
   };
 
   const handleRejectScreenShare = () => {
