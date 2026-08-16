@@ -244,6 +244,10 @@ async function initializeApp(): Promise<void> {
     }
   });
 
+  ipcMain.handle('rescan-peers', () => {
+    discovery?.triggerSubnetScan();
+  });
+
   // Start networking
   await network.startServer();
   discovery.start();

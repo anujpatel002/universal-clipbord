@@ -18,6 +18,7 @@ export const DeviceList: React.FC<DeviceListProps> = ({
   const [showManual, setShowManual] = useState(false);
   const [manualIp, setManualIp] = useState('');
   const [connecting, setConnecting] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   const handleDragOver = (e: React.DragEvent, deviceId: string) => {
     e.preventDefault();
@@ -60,6 +61,15 @@ export const DeviceList: React.FC<DeviceListProps> = ({
     }
   };
 
+  const handleRescan = async () => {
+    setScanning(true);
+    try {
+      await window.multiclip.rescanPeers();
+    } finally {
+      setTimeout(() => setScanning(false), 800);
+    }
+  };
+
   return (
     <div className="section-card">
       <div className="section-title">
@@ -68,6 +78,15 @@ export const DeviceList: React.FC<DeviceListProps> = ({
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
             {devices.filter((d) => d.status === 'online').length} online
           </span>
+          <button
+            className="btn btn-sm btn-secondary"
+            onClick={handleRescan}
+            disabled={scanning}
+            style={{ fontSize: '0.75rem', padding: '3px 8px' }}
+            title="Scan entire local network for MultiClip devices"
+          >
+            {scanning ? 'Scanning...' : '🔄 Scan LAN'}
+          </button>
           <button
             className="btn btn-sm btn-secondary"
             onClick={() => setShowManual(!showManual)}
@@ -83,7 +102,7 @@ export const DeviceList: React.FC<DeviceListProps> = ({
           <input
             type="text"
             className="input-field"
-            placeholder="Enter peer IP (e.g. 192.168.1.15)"
+            placeholder="Enter peer IP (e.g. 192.168.1.15 or 192.168.137.2:49152)"
             value={manualIp}
             onChange={(e) => setManualIp(e.target.value)}
             style={{ flex: 1, padding: '6px 10px', fontSize: '0.85rem' }}
@@ -97,9 +116,9 @@ export const DeviceList: React.FC<DeviceListProps> = ({
       <div className="device-list">
         {devices.length === 0 ? (
           <div className="empty-state">
-            Scanning LAN with mDNS & UDP broadcast...<br/>
+            Scanning LAN with TCP Subnet Sweeper, mDNS & UDP...<br/>
             <span style={{ fontSize: '0.8rem', opacity: 0.75 }}>
-              Tip: Ensure both PCs are on the same Wi-Fi / Router. You can also click "+ Connect IP" above.
+              Tip: Ensure both PCs are connected to the same Wi-Fi / Hotspot.
             </span>
           </div>
         ) : (

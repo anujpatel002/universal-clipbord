@@ -1,3 +1,4 @@
+import * as net from 'node:net';
 import * as dgram from 'node:dgram';
 import { Bonjour, Service, Browser } from 'bonjour-service';
 import { NetworkManager, getAllLocalIpv4Addresses } from './network.js';
@@ -10,6 +11,8 @@ export class DiscoveryService {
   private browser: Browser | null = null;
   private udpSocket: dgram.Socket | null = null;
   private beaconInterval: NodeJS.Timeout | null = null;
+  private subnetScanInterval: NodeJS.Timeout | null = null;
+  private isScanning = false;
 
   constructor(private network: NetworkManager) {}
 
@@ -19,7 +22,7 @@ export class DiscoveryService {
       throw new Error('TCP Server must be started before discovery');
     }
 
-    // 1. Start mDNS Discovery
+    // 1. Engine 1: mDNS Discovery (Bonjour)
     try {
       this.bonjour = new Bonjour();
       this.publishedService = this.bonjour.publish({
@@ -51,8 +54,79 @@ export class DiscoveryService {
       console.log(`[WARN] mDNS initialization failed: ${(err as Error).message}`);
     }
 
-    // 2. Start UDP Subnet Broadcast Beacon (Fast & resilient across all routers)
+    // 2. Engine 2: UDP Subnet Broadcast Beacon
     this.startUdpBroadcast();
+
+    // 3. Engine 3: Active Subnet TCP Auto-Sweeper (Guaranteed LAN auto-detection)
+    this.startSubnetScanner();
+  }
+
+  public triggerSubnetScan(): void {
+    if (this.isScanning) return;
+    this.isScanning = true;
+
+    const ifaces = getAllLocalIpv4Addresses();
+    const portsToProbe = [49152, 49153, 49154];
+    const scanPromises: Promise<void>[] = [];
+
+    for (const iface of ifaces) {
+      const parts = iface.address.split('.');
+      if (parts.length !== 4) continue;
+      const subnetBase = `${parts[0]}.${parts[1]}.${parts[2]}.`;
+      const localLastOctet = parseInt(parts[3], 10);
+
+      for (let i = 1; i <= 254; i++) {
+        if (i === localLastOctet) continue;
+        const targetIp = `${subnetBase}${i}`;
+
+        for (const targetPort of portsToProbe) {
+          scanPromises.push(
+            new Promise<void>((resolve) => {
+              const probeSocket = new net.Socket();
+              probeSocket.setTimeout(400);
+
+              probeSocket.on('connect', () => {
+                probeSocket.destroy();
+                this.network.connectToPeer(targetIp, targetPort).catch(() => {});
+                resolve();
+              });
+
+              probeSocket.on('timeout', () => {
+                probeSocket.destroy();
+                resolve();
+              });
+
+              probeSocket.on('error', () => {
+                probeSocket.destroy();
+                resolve();
+              });
+
+              try {
+                probeSocket.connect(targetPort, targetIp);
+              } catch {
+                resolve();
+              }
+            })
+          );
+        }
+      }
+    }
+
+    Promise.allSettled(scanPromises).finally(() => {
+      this.isScanning = false;
+    });
+  }
+
+  private startSubnetScanner(): void {
+    // Initial scan after 500ms
+    setTimeout(() => {
+      this.triggerSubnetScan();
+    }, 500);
+
+    // Periodic sweep every 5 seconds
+    this.subnetScanInterval = setInterval(() => {
+      this.triggerSubnetScan();
+    }, 5000);
   }
 
   private startUdpBroadcast(): void {
@@ -64,25 +138,19 @@ export class DiscoveryService {
           const packet = JSON.parse(msg.toString('utf8'));
           if (packet && packet.type === 'MULTICLIP_BEACON') {
             const local = this.network.getLocalInfo();
-            // Skip self
             if (packet.id === local.id) return;
 
             const peerIp = rinfo.address;
             const peerPort = packet.port || 49152;
             const peerId = packet.id;
 
-            this.network.connectToPeer(peerIp, peerPort, peerId).catch(() => {
-              // Peer may already be connected
-            });
+            this.network.connectToPeer(peerIp, peerPort, peerId).catch(() => {});
           }
-        } catch {
-          // Ignored
-        }
+        } catch {}
       });
 
       this.udpSocket.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EACCES' || err.code === 'EADDRINUSE') {
-          // Port 49153 restricted on this OS; fallback to dynamic sending port
           try {
             this.udpSocket?.close();
           } catch {}
@@ -98,21 +166,14 @@ export class DiscoveryService {
       this.udpSocket.bind(UDP_BEACON_PORT, '0.0.0.0', () => {
         try {
           this.udpSocket?.setBroadcast(true);
-        } catch {
-          // Ignored
-        }
+        } catch {}
 
-        // Send initial beacon immediately
         this.broadcastBeacon();
-
-        // Repeat beacon every 3 seconds
         this.beaconInterval = setInterval(() => {
           this.broadcastBeacon();
         }, 3000);
       });
-    } catch {
-      // Ignored
-    }
+    } catch {}
   }
 
   private broadcastBeacon(): void {
@@ -129,22 +190,16 @@ export class DiscoveryService {
       'utf8'
     );
 
-    // Broadcast to global 255.255.255.255
     try {
       this.udpSocket.send(payload, 0, payload.length, UDP_BEACON_PORT, '255.255.255.255');
-    } catch {
-      // Ignored
-    }
+    } catch {}
 
-    // Broadcast to each detected physical interface subnet
     const ifaces = getAllLocalIpv4Addresses();
     for (const iface of ifaces) {
       if (iface.broadcast && iface.broadcast !== '255.255.255.255') {
         try {
           this.udpSocket.send(payload, 0, payload.length, UDP_BEACON_PORT, iface.broadcast);
-        } catch {
-          // Ignored
-        }
+        } catch {}
       }
     }
   }
@@ -156,12 +211,8 @@ export class DiscoveryService {
     const peerName = txt.name || service.name;
     const port = service.port;
 
-    // Skip self
-    if (peerId === local.id) {
-      return;
-    }
+    if (peerId === local.id) return;
 
-    // Find valid IPv4 address
     let peerIp = '';
     if (service.addresses && service.addresses.length > 0) {
       peerIp = service.addresses.find((addr) => /^\d+\.\d+\.\d+\.\d+$/.test(addr) && !addr.startsWith('172.22.') && !addr.startsWith('172.31.')) ||
@@ -175,13 +226,15 @@ export class DiscoveryService {
       return;
     }
 
-    console.log(`[INFO] Discovered peer: ${peerName} (${peerId}) at ${peerIp}:${port}`);
-    this.network.connectToPeer(peerIp, port, peerId).catch(() => {
-      // Handled in NetworkManager
-    });
+    console.log(`[INFO] Discovered peer via mDNS: ${peerName} (${peerId}) at ${peerIp}:${port}`);
+    this.network.connectToPeer(peerIp, port, peerId).catch(() => {});
   }
 
   public stop(): void {
+    if (this.subnetScanInterval) {
+      clearInterval(this.subnetScanInterval);
+      this.subnetScanInterval = null;
+    }
     if (this.beaconInterval) {
       clearInterval(this.beaconInterval);
       this.beaconInterval = null;
@@ -189,9 +242,7 @@ export class DiscoveryService {
     if (this.udpSocket) {
       try {
         this.udpSocket.close();
-      } catch {
-        // Ignored
-      }
+      } catch {}
       this.udpSocket = null;
     }
     if (this.browser) {

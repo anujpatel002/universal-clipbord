@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('multiclip', {
   cancelTransfer: (transferId: string): Promise<void> => ipcRenderer.invoke('cancel-transfer', transferId),
   connectToIp: (ip: string, port?: number): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('connect-to-ip', ip, port),
+  rescanPeers: (): Promise<void> => ipcRenderer.invoke('rescan-peers'),
 
   onDeviceUpdate: (callback: (devices: Device[]) => void) => {
     const handler = (_: unknown, devices: Device[]) => callback(devices);
