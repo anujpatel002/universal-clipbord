@@ -9,7 +9,9 @@ import { AppDatabase } from './database.js';
 import { encodeChunk, ChunkMessage } from './protocol.js';
 import { packDirectoryToTar, extractTarArchive } from './archive.js';
 
-export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks
+// High-speed LAN optimized chunk size (4 MB)
+export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
+export const MAX_PIPELINE_WINDOW = 4; // 4 parallel chunks in flight (16 MB window)
 
 export function getUniqueFilePath(dir: string, fileName: string): string {
   const ext = path.extname(fileName);
@@ -28,7 +30,7 @@ export function getUniqueFilePath(dir: string, fileName: string): string {
 export function calculateFileHash(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(filePath, { highWaterMark: DEFAULT_CHUNK_SIZE });
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
     stream.on('error', (err) => reject(err));
@@ -39,10 +41,14 @@ interface OutboundTransferSession {
   transfer: Transfer;
   filePath: string;
   isTempFile: boolean;
-  currentChunk: number;
+  nextChunkToSend: number;
+  acknowledgedCount: number;
+  inFlightChunks: Set<number>;
   paused: boolean;
   cancelled: boolean;
-  ackResolver: (() => void) | null;
+  pipelineResolver: (() => void) | null;
+  lastProgressTime: number;
+  lastTransferredBytes: number;
 }
 
 interface InboundTransferSession {
@@ -144,7 +150,7 @@ export class TransferManager extends EventEmitter {
     });
   }
 
-  // --- Outbound Transfers ---
+  // --- Outbound Transfers (Sender) ---
 
   public async startOutboundTransfer(targetDeviceId: string, filePath: string): Promise<Transfer> {
     if (!fs.existsSync(filePath)) {
@@ -205,10 +211,14 @@ export class TransferManager extends EventEmitter {
       transfer,
       filePath: actualPath,
       isTempFile,
-      currentChunk: 0,
+      nextChunkToSend: 0,
+      acknowledgedCount: 0,
+      inFlightChunks: new Set(),
       paused: false,
       cancelled: false,
-      ackResolver: null,
+      pipelineResolver: null,
+      lastProgressTime: Date.now(),
+      lastTransferredBytes: 0,
     });
 
     // Send TRANSFER_REQUEST
@@ -234,11 +244,15 @@ export class TransferManager extends EventEmitter {
     if (!session) return;
 
     session.transfer.status = 'transferring';
-    session.currentChunk = typeof startChunkIndex === 'number' ? startChunkIndex : 0;
+    session.nextChunkToSend = typeof startChunkIndex === 'number' ? startChunkIndex : 0;
+    session.acknowledgedCount = session.nextChunkToSend;
+    session.lastProgressTime = Date.now();
+    session.lastTransferredBytes = session.transfer.transferred;
+
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
-    this.streamOutboundChunks(session);
+    this.streamOutboundPipelined(session);
   }
 
   private handleTransferReject(payload: Record<string, any>): void {
@@ -257,49 +271,59 @@ export class TransferManager extends EventEmitter {
     this.outboundSessions.delete(transferId);
   }
 
-  private async streamOutboundChunks(session: OutboundTransferSession): Promise<void> {
+  /**
+   * Pipelined chunk streaming with sliding window:
+   * Keeps up to MAX_PIPELINE_WINDOW chunks in flight to saturate LAN bandwidth (300+ MB/s).
+   */
+  private async streamOutboundPipelined(session: OutboundTransferSession): Promise<void> {
     const { transfer, filePath } = session;
 
-    while (session.currentChunk < transfer.totalChunks && !session.paused && !session.cancelled) {
-      const chunkIndex = session.currentChunk;
-      const start = chunkIndex * transfer.chunkSize;
-      const end = Math.min(start + transfer.chunkSize - 1, transfer.size - 1);
-      const currentChunkSize = transfer.size === 0 ? 0 : end - start + 1;
+    while (session.acknowledgedCount < transfer.totalChunks && !session.paused && !session.cancelled) {
+      // While window has space, dispatch chunks into the TCP socket
+      while (
+        session.inFlightChunks.size < MAX_PIPELINE_WINDOW &&
+        session.nextChunkToSend < transfer.totalChunks &&
+        !session.paused &&
+        !session.cancelled
+      ) {
+        const chunkIndex = session.nextChunkToSend;
+        session.nextChunkToSend++;
+        session.inFlightChunks.add(chunkIndex);
 
-      // Stream read single chunk using fs.createReadStream (zero-RAM overhead)
-      const chunkBuffer = await this.readChunkStream(filePath, start, end);
+        const start = chunkIndex * transfer.chunkSize;
+        const end = Math.min(start + transfer.chunkSize - 1, transfer.size - 1);
+        const currentChunkSize = transfer.size === 0 ? 0 : end - start + 1;
 
-      const chunkFrame = encodeChunk(
-        {
-          transferId: transfer.id,
-          chunkIndex,
-          chunkSize: currentChunkSize,
-        },
-        chunkBuffer
-      );
+        // Zero-copy chunk stream read directly from disk
+        const chunkBuffer = await this.readChunkStream(filePath, start, end);
 
-      // Create backpressure promise for CHUNK_ACK
-      const ackPromise = new Promise<void>((resolve) => {
-        session.ackResolver = resolve;
-      });
+        const chunkFrame = encodeChunk(
+          {
+            transferId: transfer.id,
+            chunkIndex,
+            chunkSize: currentChunkSize,
+          },
+          chunkBuffer
+        );
 
-      // Send binary chunk frame directly
-      this.network.sendChunk(transfer.destinationDeviceId, chunkFrame);
+        this.network.sendChunk(transfer.destinationDeviceId, chunkFrame);
+      }
 
-      // Await receiver ACK before sending next chunk
-      await ackPromise;
-
-      transfer.transferred = Math.min(transfer.size, (chunkIndex + 1) * transfer.chunkSize);
-      transfer.updatedAt = Date.now();
-      this.db.saveTransfer(transfer);
-      this.emit('transfer_updated', transfer);
-
-      session.currentChunk++;
+      // If window is full or all chunks dispatched, wait for next ACK
+      if (session.inFlightChunks.size >= MAX_PIPELINE_WINDOW || session.nextChunkToSend >= transfer.totalChunks) {
+        if (session.acknowledgedCount < transfer.totalChunks) {
+          await new Promise<void>((resolve) => {
+            session.pipelineResolver = resolve;
+          });
+        }
+      }
     }
 
-    if (session.currentChunk >= transfer.totalChunks && !session.cancelled) {
+    if (session.acknowledgedCount >= transfer.totalChunks && !session.cancelled) {
       transfer.status = 'completed';
       transfer.transferred = transfer.size;
+      transfer.speed = undefined;
+      transfer.eta = undefined;
       transfer.updatedAt = Date.now();
       this.db.saveTransfer(transfer);
       this.emit('transfer_updated', transfer);
@@ -325,7 +349,7 @@ export class TransferManager extends EventEmitter {
         return resolve(Buffer.alloc(0));
       }
       const chunks: Buffer[] = [];
-      const stream = fs.createReadStream(filePath, { start, end });
+      const stream = fs.createReadStream(filePath, { start, end, highWaterMark: DEFAULT_CHUNK_SIZE });
       stream.on('data', (data: Buffer | string) => chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(data)));
       stream.on('end', () => resolve(Buffer.concat(chunks)));
       stream.on('error', (err) => reject(err));
@@ -333,15 +357,39 @@ export class TransferManager extends EventEmitter {
   }
 
   private handleChunkAck(payload: Record<string, any>): void {
-    const { transferId } = payload;
+    const { transferId, chunkIndex } = payload;
     const session = this.outboundSessions.get(transferId);
-    if (session && session.ackResolver) {
-      session.ackResolver();
-      session.ackResolver = null;
+    if (!session) return;
+
+    if (session.inFlightChunks.has(chunkIndex)) {
+      session.inFlightChunks.delete(chunkIndex);
+      session.acknowledgedCount++;
+
+      const now = Date.now();
+      session.transfer.transferred = Math.min(session.transfer.size, session.acknowledgedCount * session.transfer.chunkSize);
+
+      const timeDelta = (now - session.lastProgressTime) / 1000;
+      if (timeDelta >= 0.25) {
+        const bytesDelta = session.transfer.transferred - session.lastTransferredBytes;
+        const currentSpeed = Math.round(bytesDelta / timeDelta);
+        session.transfer.speed = currentSpeed;
+        session.transfer.eta = currentSpeed > 0 ? Math.max(0, Math.ceil((session.transfer.size - session.transfer.transferred) / currentSpeed)) : undefined;
+        session.lastProgressTime = now;
+        session.lastTransferredBytes = session.transfer.transferred;
+      }
+
+      session.transfer.updatedAt = now;
+      this.db.saveTransfer(session.transfer);
+      this.emit('transfer_updated', session.transfer);
+
+      if (session.pipelineResolver) {
+        session.pipelineResolver();
+        session.pipelineResolver = null;
+      }
     }
   }
 
-  // --- Inbound Transfers ---
+  // --- Inbound Transfers (Receiver) ---
 
   private handleTransferRequest(deviceId: string | null, payload: Record<string, any>): void {
     const { transferId, fileName, fileSize, chunkSize, totalChunks, isFolder, folderName } = payload;
@@ -409,6 +457,7 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(header.transferId);
     if (!session) return;
 
+    // Fast direct write into open file descriptor
     const offset = header.chunkIndex * session.transfer.chunkSize;
     if (data.length > 0) {
       fs.writeSync(session.fd, data, 0, data.length, offset);
@@ -424,11 +473,14 @@ export class TransferManager extends EventEmitter {
       session.transfer.transferred = 0;
     }
 
+    // High-precision speed & ETA computation over 250ms window
     const now = Date.now();
     const timeDelta = (now - session.lastProgressTime) / 1000;
-    if (timeDelta >= 0.5) {
+    if (timeDelta >= 0.25) {
       const bytesDelta = session.transfer.transferred - session.lastTransferredBytes;
-      session.transfer.speed = Math.round(bytesDelta / timeDelta);
+      const currentSpeed = Math.round(bytesDelta / timeDelta);
+      session.transfer.speed = currentSpeed;
+      session.transfer.eta = currentSpeed > 0 ? Math.max(0, Math.ceil((session.transfer.size - session.transfer.transferred) / currentSpeed)) : undefined;
       session.lastProgressTime = now;
       session.lastTransferredBytes = session.transfer.transferred;
     }
@@ -437,6 +489,7 @@ export class TransferManager extends EventEmitter {
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
 
+    // Send ACK immediately to advance sliding window
     const targetDevId = deviceId || session.transfer.sourceDeviceId;
     this.network.sendMessage(targetDevId, {
       type: 'CHUNK_ACK',
@@ -475,6 +528,8 @@ export class TransferManager extends EventEmitter {
 
     session.transfer.status = 'completed';
     session.transfer.transferred = session.transfer.size;
+    session.transfer.speed = undefined;
+    session.transfer.eta = undefined;
     session.transfer.updatedAt = Date.now();
     this.db.saveTransfer(session.transfer);
     this.emit('transfer_updated', session.transfer);
@@ -482,13 +537,15 @@ export class TransferManager extends EventEmitter {
     this.inboundSessions.delete(transferId);
   }
 
-  // --- Pause / Resume / Cancel Controls ---
+  // --- Controls ---
 
   public pauseTransfer(transferId: string): void {
     const outSession = this.outboundSessions.get(transferId);
     if (outSession) {
       outSession.paused = true;
       outSession.transfer.status = 'paused';
+      outSession.transfer.speed = undefined;
+      outSession.transfer.eta = undefined;
       outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
@@ -505,6 +562,8 @@ export class TransferManager extends EventEmitter {
     if (outSession && outSession.paused) {
       outSession.paused = false;
       outSession.transfer.status = 'transferring';
+      outSession.lastProgressTime = Date.now();
+      outSession.lastTransferredBytes = outSession.transfer.transferred;
       outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
@@ -514,7 +573,7 @@ export class TransferManager extends EventEmitter {
         payload: { transferId },
       });
 
-      this.streamOutboundChunks(outSession);
+      this.streamOutboundPipelined(outSession);
     }
   }
 
@@ -523,6 +582,8 @@ export class TransferManager extends EventEmitter {
     if (outSession) {
       outSession.cancelled = true;
       outSession.transfer.status = 'cancelled';
+      outSession.transfer.speed = undefined;
+      outSession.transfer.eta = undefined;
       outSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(outSession.transfer);
       this.emit('transfer_updated', outSession.transfer);
@@ -544,6 +605,8 @@ export class TransferManager extends EventEmitter {
       try { if (fs.existsSync(inSession.partPath)) fs.unlinkSync(inSession.partPath); } catch {}
 
       inSession.transfer.status = 'cancelled';
+      inSession.transfer.speed = undefined;
+      inSession.transfer.eta = undefined;
       inSession.transfer.updatedAt = Date.now();
       this.db.saveTransfer(inSession.transfer);
       this.emit('transfer_updated', inSession.transfer);
@@ -557,6 +620,8 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(transferId);
     if (session) {
       session.transfer.status = 'paused';
+      session.transfer.speed = undefined;
+      session.transfer.eta = undefined;
       this.db.saveTransfer(session.transfer);
       this.emit('transfer_updated', session.transfer);
     }
@@ -567,6 +632,8 @@ export class TransferManager extends EventEmitter {
     const session = this.inboundSessions.get(transferId);
     if (session) {
       session.transfer.status = 'transferring';
+      session.lastProgressTime = Date.now();
+      session.lastTransferredBytes = session.transfer.transferred;
       this.db.saveTransfer(session.transfer);
       this.emit('transfer_updated', session.transfer);
     }
@@ -579,6 +646,8 @@ export class TransferManager extends EventEmitter {
       try { fs.closeSync(session.fd); } catch {}
       try { if (fs.existsSync(session.partPath)) fs.unlinkSync(session.partPath); } catch {}
       session.transfer.status = 'cancelled';
+      session.transfer.speed = undefined;
+      session.transfer.eta = undefined;
       this.db.saveTransfer(session.transfer);
       this.emit('transfer_updated', session.transfer);
       this.inboundSessions.delete(transferId);

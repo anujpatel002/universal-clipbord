@@ -57,6 +57,7 @@ export interface Transfer {
   isFolder?: boolean;
   folderName?: string;
   speed?: number; // bytes/sec
+  eta?: number;   // estimated seconds remaining
   error?: string;
   createdAt: number;
   updatedAt: number;

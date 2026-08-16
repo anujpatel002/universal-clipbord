@@ -209,9 +209,9 @@ export const ClipboardSection: React.FC<ClipboardSectionProps> = ({
                 )}
                 {item.type === 'file' && item.path && (
                   <button
-                    className="btn btn-sm btn-secondary"
+                    className="btn btn-sm btn-primary"
                     onClick={() => onRequestFile(item.sourceDeviceId, item.path!)}
-                    title="Download/Sync file to this PC"
+                    title="Initiate high-speed LAN download"
                   >
                     📥 Download
                   </button>

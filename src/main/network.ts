@@ -175,6 +175,8 @@ export class NetworkManager extends EventEmitter {
   }
 
   private handleInboundConnection(socket: net.Socket): void {
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 10000);
     const framer = new MessageFramer();
     let remoteDeviceId: string | null = null;
 
@@ -239,6 +241,8 @@ export class NetworkManager extends EventEmitter {
 
       socket.on('connect', () => {
         socket.setTimeout(0);
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true, 10000);
         const framer = new MessageFramer();
         let peerDevId = knownDeviceId || '';
 

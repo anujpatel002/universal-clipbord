@@ -122,10 +122,8 @@ async function initializeApp(): Promise<void> {
       if (item.type === 'text' && item.content) {
         // Instant seamless text sync to OS clipboard
         clipboardMonitor?.setClipboardText(item.content, true);
-      } else if (item.type === 'file' && item.path && sender.id) {
-        // Seamless file sync: Automatically fetch file in background so user can Ctrl+V immediately
-        transferManager?.requestFileFromPeer(sender.id, item.path);
       }
+      // Note: Files/Folders are manual-download only on the receiving PC
 
       mainWindow?.webContents.send('clipboard-updated', item);
     } else if (message.type === 'SCREEN_SHARE_OFFER') {
