@@ -7,7 +7,7 @@ import { Transfer, ProtocolMessage } from '../shared/types.js';
 import { NetworkManager } from './network.js';
 import { AppDatabase } from './database.js';
 import { encodeChunk, ChunkMessage } from './protocol.js';
-import { zipFolder, unzipArchive } from './archive.js';
+import { packDirectoryToTar, extractTarArchive } from './archive.js';
 
 export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks
 
@@ -167,16 +167,14 @@ export class TransferManager extends EventEmitter {
     let folderName: string | undefined;
     let isTempFile = false;
 
-    // Automatic recursive folder zipping on the fly
+    // Automatic zero-RAM streaming folder packer
     if (isFolder) {
       folderName = path.basename(filePath);
-      fileName = `${folderName}.zip`;
-      const tempDir = path.join(this.downloadDir, '.temp_zip');
-      const tempZipPath = path.join(tempDir, `${folderName}_${transferId.slice(0, 8)}.zip`);
-      await zipFolder(filePath, tempZipPath);
-      actualPath = tempZipPath;
-      const zipStats = fs.statSync(tempZipPath);
-      actualSize = zipStats.size;
+      fileName = `${folderName}.tar`;
+      const tempDir = path.join(this.downloadDir, '.temp_archive');
+      const tempTarPath = path.join(tempDir, `${folderName}_${transferId.slice(0, 8)}.tar`);
+      actualSize = await packDirectoryToTar(filePath, tempTarPath);
+      actualPath = tempTarPath;
       isTempFile = true;
     }
 
@@ -463,11 +461,11 @@ export class TransferManager extends EventEmitter {
       fs.renameSync(session.partPath, session.finalPath);
     }
 
-    // Auto-extract folder if this was an auto-zipped folder
+    // Auto-extract folder if this was an auto-archived folder
     if (session.transfer.isFolder && session.transfer.folderName) {
       try {
         const extractTarget = getUniqueFilePath(this.downloadDir, session.transfer.folderName);
-        await unzipArchive(session.finalPath, extractTarget);
+        await extractTarArchive(session.finalPath, extractTarget);
         try { fs.unlinkSync(session.finalPath); } catch {}
         session.transfer.fileName = path.basename(extractTarget);
       } catch (err) {
