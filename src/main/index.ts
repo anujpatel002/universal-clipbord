@@ -21,6 +21,9 @@ let isQuitting = false;
 // Suppress Windows GPU disk cache lock warnings in multi-run dev environments
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 app.commandLine.appendSwitch('disable-http-cache');
+// Disable Chromium mDNS IP obfuscation so LAN WebRTC streams can connect directly across PCs
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
 

@@ -4,6 +4,12 @@ import {
   ScreenShareIcePayload,
 } from '../shared/types.js';
 
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+];
+
 export class WebRTCManager {
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
   private localStreams: Map<string, MediaStream> = new Map();
@@ -50,13 +56,16 @@ export class WebRTCManager {
     streamId: string = crypto.randomUUID()
   ): Promise<string> {
     const pc = new RTCPeerConnection({
-      iceServers: [],
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 4,
     });
 
     this.peerConnections.set(streamId, pc);
     this.localStreams.set(streamId, stream);
 
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    stream.getTracks().forEach((track) => {
+      pc.addTrack(track, stream);
+    });
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -65,6 +74,14 @@ export class WebRTCManager {
           candidate: event.candidate.toJSON(),
         });
       }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Sender] Connection state: ${pc.connectionState}`);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Sender] ICE state: ${pc.iceConnectionState}`);
     };
 
     const offer = await pc.createOffer({
@@ -95,14 +112,19 @@ export class WebRTCManager {
     const { streamId, sdp } = payload;
 
     const pc = new RTCPeerConnection({
-      iceServers: [],
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 4,
     });
 
     this.peerConnections.set(streamId, pc);
 
     pc.ontrack = (event) => {
+      console.log('[WebRTC Receiver] ontrack received:', event);
       if (event.streams && event.streams[0]) {
         onRemoteStream(event.streams[0]);
+      } else if (event.track) {
+        const fallbackStream = new MediaStream([event.track]);
+        onRemoteStream(fallbackStream);
       }
     };
 
@@ -113,6 +135,14 @@ export class WebRTCManager {
           candidate: event.candidate.toJSON(),
         });
       }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Receiver] Connection state: ${pc.connectionState}`);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Receiver] ICE state: ${pc.iceConnectionState}`);
     };
 
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));

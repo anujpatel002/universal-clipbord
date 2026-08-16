@@ -23,14 +23,28 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      
+      const handlePlaySuccess = () => setIsPlaying(true);
+      videoRef.current.addEventListener('playing', handlePlaySuccess);
+      videoRef.current.addEventListener('loadeddata', handlePlaySuccess);
+
       videoRef.current
         .play()
         .then(() => setIsPlaying(true))
         .catch((err) => {
           console.log('[WARN] Video auto-play error:', err);
         });
-    }
 
+      return () => {
+        if (videoRef.current) {
+          videoRef.current.removeEventListener('playing', handlePlaySuccess);
+          videoRef.current.removeEventListener('loadeddata', handlePlaySuccess);
+        }
+      };
+    }
+  }, [stream]);
+
+  useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
@@ -39,7 +53,7 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
-  }, [stream]);
+  }, []);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
@@ -104,7 +118,7 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
       {/* Video stream canvas */}
       <div className="video-container">
         {!stream || !isPlaying ? (
-          <div className="empty-placeholder" style={{ color: '#fff' }}>
+          <div className="empty-placeholder" style={{ color: '#fff', position: 'absolute' }}>
             <div className="empty-icon">📡</div>
             <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>Connecting to {peerName}...</div>
             <div style={{ fontSize: '0.85rem', opacity: 0.8 }}>
@@ -116,7 +130,7 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({
         <video
           ref={videoRef}
           className="screen-video-player"
-          style={{ display: stream ? 'block' : 'none' }}
+          style={{ opacity: isPlaying ? 1 : 0 }}
           autoPlay
           playsInline
           muted
