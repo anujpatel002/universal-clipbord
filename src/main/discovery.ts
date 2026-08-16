@@ -70,8 +70,19 @@ export class DiscoveryService {
         }
       });
 
-      this.udpSocket.on('error', (err) => {
-        console.log(`[WARN] UDP discovery error: ${err.message}`);
+      this.udpSocket.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EACCES' || err.code === 'EADDRINUSE') {
+          // Port 49153 restricted on this OS; fallback to dynamic sending port
+          try {
+            this.udpSocket?.close();
+          } catch {}
+          try {
+            this.udpSocket = dgram.createSocket({ type: 'udp4' });
+            this.udpSocket.bind(0, () => {
+              try { this.udpSocket?.setBroadcast(true); } catch {}
+            });
+          } catch {}
+        }
       });
 
       this.udpSocket.bind(UDP_BEACON_PORT, '0.0.0.0', () => {
@@ -89,8 +100,8 @@ export class DiscoveryService {
           this.broadcastBeacon();
         }, 3000);
       });
-    } catch (err) {
-      console.log(`[WARN] Failed to start UDP broadcast: ${(err as Error).message}`);
+    } catch {
+      // Ignored
     }
   }
 
