@@ -5,6 +5,11 @@ import {
   ClipboardItem,
   Transfer,
   PairingRequestItem,
+  ScreenSource,
+  ScreenShareOfferPayload,
+  ScreenShareAnswerPayload,
+  ScreenShareIcePayload,
+  ScreenShareStopPayload,
 } from '../shared/types.js';
 
 contextBridge.exposeInMainWorld('multiclip', {
@@ -33,6 +38,17 @@ contextBridge.exposeInMainWorld('multiclip', {
   rescanPeers: (): Promise<void> => ipcRenderer.invoke('rescan-peers'),
   clearClipboardHistory: (): Promise<void> => ipcRenderer.invoke('clear-clipboard-history'),
 
+  // Screen Share APIs
+  getScreenSources: (): Promise<ScreenSource[]> => ipcRenderer.invoke('get-screen-sources'),
+  sendScreenShareOffer: (targetDeviceId: string, payload: ScreenShareOfferPayload): Promise<void> =>
+    ipcRenderer.invoke('send-screenshare-offer', targetDeviceId, payload),
+  sendScreenShareAnswer: (targetDeviceId: string, payload: ScreenShareAnswerPayload): Promise<void> =>
+    ipcRenderer.invoke('send-screenshare-answer', targetDeviceId, payload),
+  sendScreenShareIce: (targetDeviceId: string, payload: ScreenShareIcePayload): Promise<void> =>
+    ipcRenderer.invoke('send-screenshare-ice', targetDeviceId, payload),
+  sendScreenShareStop: (targetDeviceId: string, payload: ScreenShareStopPayload): Promise<void> =>
+    ipcRenderer.invoke('send-screenshare-stop', targetDeviceId, payload),
+
   onDeviceUpdate: (callback: (devices: Device[]) => void) => {
     const handler = (_: unknown, devices: Device[]) => callback(devices);
     ipcRenderer.on('devices-updated', handler);
@@ -52,5 +68,26 @@ contextBridge.exposeInMainWorld('multiclip', {
     const handler = (_: unknown, req: PairingRequestItem) => callback(req);
     ipcRenderer.on('pairing-requested', handler);
     return () => ipcRenderer.removeListener('pairing-requested', handler);
+  },
+
+  onScreenShareOffer: (callback: (data: { sourceDeviceId: string; sourceDeviceName: string; payload: ScreenShareOfferPayload }) => void) => {
+    const handler = (_: unknown, data: any) => callback(data);
+    ipcRenderer.on('screenshare-offer', handler);
+    return () => ipcRenderer.removeListener('screenshare-offer', handler);
+  },
+  onScreenShareAnswer: (callback: (data: { sourceDeviceId: string; payload: ScreenShareAnswerPayload }) => void) => {
+    const handler = (_: unknown, data: any) => callback(data);
+    ipcRenderer.on('screenshare-answer', handler);
+    return () => ipcRenderer.removeListener('screenshare-answer', handler);
+  },
+  onScreenShareIce: (callback: (data: { sourceDeviceId: string; payload: ScreenShareIcePayload }) => void) => {
+    const handler = (_: unknown, data: any) => callback(data);
+    ipcRenderer.on('screenshare-ice', handler);
+    return () => ipcRenderer.removeListener('screenshare-ice', handler);
+  },
+  onScreenShareStop: (callback: (data: { sourceDeviceId: string; payload: ScreenShareStopPayload }) => void) => {
+    const handler = (_: unknown, data: any) => callback(data);
+    ipcRenderer.on('screenshare-stop', handler);
+    return () => ipcRenderer.removeListener('screenshare-stop', handler);
   },
 });

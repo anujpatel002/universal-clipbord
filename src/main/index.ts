@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, desktopCapturer } from 'electron';
 import * as path from 'node:path';
 import { AppDatabase } from './database.js';
 import { SecurityManager } from './security.js';
@@ -128,6 +128,30 @@ async function initializeApp(): Promise<void> {
       }
 
       mainWindow?.webContents.send('clipboard-updated', item);
+    } else if (message.type === 'SCREEN_SHARE_OFFER') {
+      const sender = deviceId ? network?.getDevice(deviceId) : null;
+      if (sender && sender.trusted) {
+        mainWindow?.webContents.send('screenshare-offer', {
+          sourceDeviceId: sender.id,
+          sourceDeviceName: sender.name,
+          payload: message.payload,
+        });
+      }
+    } else if (message.type === 'SCREEN_SHARE_ANSWER') {
+      mainWindow?.webContents.send('screenshare-answer', {
+        sourceDeviceId: deviceId,
+        payload: message.payload,
+      });
+    } else if (message.type === 'SCREEN_SHARE_ICE') {
+      mainWindow?.webContents.send('screenshare-ice', {
+        sourceDeviceId: deviceId,
+        payload: message.payload,
+      });
+    } else if (message.type === 'SCREEN_SHARE_STOP') {
+      mainWindow?.webContents.send('screenshare-stop', {
+        sourceDeviceId: deviceId,
+        payload: message.payload,
+      });
     }
   });
 
@@ -247,6 +271,50 @@ async function initializeApp(): Promise<void> {
 
   ipcMain.handle('rescan-peers', () => {
     discovery?.triggerSubnetScan();
+  });
+
+  // Screen Share IPC
+  ipcMain.handle('get-screen-sources', async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: true,
+    });
+    return sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      thumbnail: s.thumbnail.toDataURL(),
+      display_id: s.display_id,
+      appIcon: s.appIcon ? s.appIcon.toDataURL() : undefined,
+    }));
+  });
+
+  ipcMain.handle('send-screenshare-offer', (_event, targetDeviceId: string, payload: any) => {
+    network?.sendMessage(targetDeviceId, {
+      type: 'SCREEN_SHARE_OFFER',
+      payload,
+    });
+  });
+
+  ipcMain.handle('send-screenshare-answer', (_event, targetDeviceId: string, payload: any) => {
+    network?.sendMessage(targetDeviceId, {
+      type: 'SCREEN_SHARE_ANSWER',
+      payload,
+    });
+  });
+
+  ipcMain.handle('send-screenshare-ice', (_event, targetDeviceId: string, payload: any) => {
+    network?.sendMessage(targetDeviceId, {
+      type: 'SCREEN_SHARE_ICE',
+      payload,
+    });
+  });
+
+  ipcMain.handle('send-screenshare-stop', (_event, targetDeviceId: string, payload: any) => {
+    network?.sendMessage(targetDeviceId, {
+      type: 'SCREEN_SHARE_STOP',
+      payload,
+    });
   });
 
   // Start networking

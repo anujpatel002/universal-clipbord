@@ -80,6 +80,10 @@ export type MessageType =
   | 'TRANSFER_RESUME'
   | 'TRANSFER_CANCEL'
   | 'TRANSFER_COMPLETE'
+  | 'SCREEN_SHARE_OFFER'
+  | 'SCREEN_SHARE_ANSWER'
+  | 'SCREEN_SHARE_ICE'
+  | 'SCREEN_SHARE_STOP'
   | 'ERROR';
 
 export interface HelloPayload {
@@ -119,6 +123,35 @@ export interface PairingRequestItem {
   timestamp: number;
 }
 
+export interface ScreenSource {
+  id: string;
+  name: string;
+  thumbnail: string;
+  display_id?: string;
+  appIcon?: string;
+}
+
+export interface ScreenShareOfferPayload {
+  streamId: string;
+  sdp: any;
+  sourceName: string;
+  quality: '720p' | '1080p' | '4k';
+}
+
+export interface ScreenShareAnswerPayload {
+  streamId: string;
+  sdp: any;
+}
+
+export interface ScreenShareIcePayload {
+  streamId: string;
+  candidate: any;
+}
+
+export interface ScreenShareStopPayload {
+  streamId: string;
+}
+
 export interface ProtocolMessage<T = unknown> {
   type: MessageType;
   payload: T;
@@ -144,10 +177,23 @@ export interface MultiClipAPI {
   connectToIp: (ip: string, port?: number) => Promise<{ success: boolean; error?: string }>;
   rescanPeers: () => Promise<void>;
   clearClipboardHistory: () => Promise<void>;
+
+  // Screen Share APIs
+  getScreenSources: () => Promise<ScreenSource[]>;
+  sendScreenShareOffer: (targetDeviceId: string, payload: ScreenShareOfferPayload) => Promise<void>;
+  sendScreenShareAnswer: (targetDeviceId: string, payload: ScreenShareAnswerPayload) => Promise<void>;
+  sendScreenShareIce: (targetDeviceId: string, payload: ScreenShareIcePayload) => Promise<void>;
+  sendScreenShareStop: (targetDeviceId: string, payload: ScreenShareStopPayload) => Promise<void>;
+
   onDeviceUpdate: (callback: (devices: Device[]) => void) => () => void;
   onClipboardUpdate: (callback: (item: ClipboardItem) => void) => () => void;
   onTransferUpdate: (callback: (transfer: Transfer) => void) => () => void;
   onPairingRequest: (callback: (request: PairingRequestItem) => void) => () => void;
+
+  onScreenShareOffer: (callback: (data: { sourceDeviceId: string; sourceDeviceName: string; payload: ScreenShareOfferPayload }) => void) => () => void;
+  onScreenShareAnswer: (callback: (data: { sourceDeviceId: string; payload: ScreenShareAnswerPayload }) => void) => () => void;
+  onScreenShareIce: (callback: (data: { sourceDeviceId: string; payload: ScreenShareIcePayload }) => void) => () => void;
+  onScreenShareStop: (callback: (data: { sourceDeviceId: string; payload: ScreenShareStopPayload }) => void) => () => void;
 }
 
 declare global {
