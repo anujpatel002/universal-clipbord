@@ -207,6 +207,16 @@ export class NetworkManager extends EventEmitter {
   }
 
   public async connectToPeer(ip: string, port: number, knownDeviceId?: string): Promise<Device> {
+    let targetIp = ip.trim();
+    let targetPort = port;
+
+    if (targetIp.includes(':')) {
+      const parts = targetIp.split(':');
+      targetIp = parts[0].trim();
+      const p = parseInt(parts[1], 10);
+      if (!isNaN(p) && p > 0) targetPort = p;
+    }
+
     if (knownDeviceId && this.connections.has(knownDeviceId)) {
       const existing = this.connections.get(knownDeviceId)!;
       if (!existing.socket.destroyed) {
@@ -215,7 +225,20 @@ export class NetworkManager extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: ip, port }, () => {
+      let isSettled = false;
+      const socket = net.createConnection({ host: targetIp, port: targetPort });
+      socket.setTimeout(6000);
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        if (!isSettled) {
+          isSettled = true;
+          reject(new Error(`Connection timed out to ${targetIp}:${targetPort}. Please verify Windows Defender Firewall allows incoming connections on port ${targetPort}.`));
+        }
+      });
+
+      socket.on('connect', () => {
+        socket.setTimeout(0);
         const framer = new MessageFramer();
         let peerDevId = knownDeviceId || '';
 
@@ -243,7 +266,7 @@ export class NetworkManager extends EventEmitter {
         });
 
         socket.on('error', (err) => {
-          console.log(`[WARN] Peer socket error (${ip}:${port}): ${err.message}`);
+          console.log(`[WARN] Peer socket error (${targetIp}:${targetPort}): ${err.message}`);
         });
 
         // Send HELLO handshake immediately

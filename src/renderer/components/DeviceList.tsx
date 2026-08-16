@@ -46,12 +46,12 @@ export const DeviceList: React.FC<DeviceListProps> = ({
     if (!manualIp.trim()) return;
     setConnecting(true);
     try {
-      const success = await window.multiclip.connectToIp(manualIp.trim());
-      if (success) {
+      const res = await window.multiclip.connectToIp(manualIp.trim());
+      if (res.success) {
         setManualIp('');
         setShowManual(false);
       } else {
-        alert(`Could not connect to ${manualIp.trim()}. Please ensure MultiClip is running on that PC and firewall allows local connections.`);
+        alert(res.error || `Could not connect to ${manualIp.trim()}. Please ensure MultiClip is running on that PC and firewall allows local connections.`);
       }
     } catch (err) {
       alert(`Connection error: ${(err as Error).message}`);

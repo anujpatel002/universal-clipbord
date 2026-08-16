@@ -28,7 +28,8 @@ contextBridge.exposeInMainWorld('multiclip', {
   pauseTransfer: (transferId: string): Promise<void> => ipcRenderer.invoke('pause-transfer', transferId),
   resumeTransfer: (transferId: string): Promise<void> => ipcRenderer.invoke('resume-transfer', transferId),
   cancelTransfer: (transferId: string): Promise<void> => ipcRenderer.invoke('cancel-transfer', transferId),
-  connectToIp: (ip: string, port?: number): Promise<boolean> => ipcRenderer.invoke('connect-to-ip', ip, port),
+  connectToIp: (ip: string, port?: number): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('connect-to-ip', ip, port),
 
   onDeviceUpdate: (callback: (devices: Device[]) => void) => {
     const handler = (_: unknown, devices: Device[]) => callback(devices);

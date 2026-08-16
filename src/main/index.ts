@@ -228,14 +228,15 @@ async function initializeApp(): Promise<void> {
 
   ipcMain.handle('connect-to-ip', async (_event, ip: string, port = 49152) => {
     try {
-      if (!network) return false;
-      const cleanIp = ip.trim();
-      if (!cleanIp) return false;
-      await network.connectToPeer(cleanIp, port);
-      return true;
+      if (!network) return { success: false, error: 'Network manager not ready' };
+      const cleanInput = ip.trim();
+      if (!cleanInput) return { success: false, error: 'IP address cannot be empty' };
+
+      const dev = await network.connectToPeer(cleanInput, port);
+      return { success: true, device: dev };
     } catch (err) {
       console.log(`[WARN] Manual connect to ${ip}:${port} failed: ${(err as Error).message}`);
-      return false;
+      return { success: false, error: (err as Error).message };
     }
   });
 
