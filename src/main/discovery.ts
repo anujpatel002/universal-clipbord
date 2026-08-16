@@ -26,6 +26,7 @@ export class DiscoveryService {
         name: `MultiClip-${local.id.slice(0, 8)}`,
         type: 'multiclip',
         port: local.port,
+        probe: false,
         txt: {
           id: local.id,
           name: local.name,
@@ -33,9 +34,18 @@ export class DiscoveryService {
         },
       });
 
+      this.publishedService.on('error', (err: Error) => {
+        console.log(`[WARN] Bonjour publish warning: ${err.message}`);
+      });
+
       this.browser = this.bonjour.find({ type: 'multiclip' }, (service: Service) => {
         this.handleDiscoveredService(service);
       });
+
+      (this.browser as any)?.on?.('error', (err: Error) => {
+        console.log(`[WARN] Bonjour browser warning: ${err.message}`);
+      });
+
       console.log(`[INFO] mDNS advertising as MultiClip-${local.id.slice(0, 8)} on port ${local.port}`);
     } catch (err) {
       console.log(`[WARN] mDNS initialization failed: ${(err as Error).message}`);
