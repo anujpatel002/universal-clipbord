@@ -13,7 +13,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 export class WebRTCManager {
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
   private localStreams: Map<string, MediaStream> = new Map();
-  private earlyIceCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
+  private earlyIceCandidates: Map<string, any[]> = new Map();
 
   /**
    * Captures screen or window stream using desktopCapturer media constraints
@@ -42,7 +42,12 @@ export class WebRTCManager {
       },
     };
 
-    return await navigator.mediaDevices.getUserMedia(constraints as any);
+    const stream = await navigator.mediaDevices.getUserMedia(constraints as any);
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      track.enabled = true;
+    }
+    return stream;
   }
 
   /**
@@ -68,10 +73,15 @@ export class WebRTCManager {
     });
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && event.candidate.candidate) {
         window.multiclip?.sendScreenShareIce(targetDeviceId, {
           streamId,
-          candidate: event.candidate.toJSON(),
+          candidate: {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            usernameFragment: event.candidate.usernameFragment,
+          },
         });
       }
     };
@@ -91,12 +101,17 @@ export class WebRTCManager {
 
     await pc.setLocalDescription(offer);
 
-    await window.multiclip?.sendScreenShareOffer(targetDeviceId, {
-      streamId,
-      sdp: pc.localDescription,
-      sourceName,
-      quality,
-    });
+    if (pc.localDescription) {
+      await window.multiclip?.sendScreenShareOffer(targetDeviceId, {
+        streamId,
+        sdp: {
+          type: pc.localDescription.type,
+          sdp: pc.localDescription.sdp,
+        },
+        sourceName,
+        quality,
+      });
+    }
 
     return streamId;
   }
@@ -129,10 +144,15 @@ export class WebRTCManager {
     };
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && event.candidate.candidate) {
         window.multiclip?.sendScreenShareIce(sourceDeviceId, {
           streamId,
-          candidate: event.candidate.toJSON(),
+          candidate: {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            usernameFragment: event.candidate.usernameFragment,
+          },
         });
       }
     };
@@ -145,13 +165,24 @@ export class WebRTCManager {
       console.log(`[WebRTC Receiver] ICE state: ${pc.iceConnectionState}`);
     };
 
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    if (sdp && sdp.sdp && sdp.type) {
+      await pc.setRemoteDescription(new RTCSessionDescription({
+        type: sdp.type,
+        sdp: sdp.sdp,
+      }));
+    }
 
     // Drain and apply any early ICE candidates received before accept
     const earlyCandidates = this.earlyIceCandidates.get(streamId) || [];
     for (const cand of earlyCandidates) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(cand));
+        if (cand && cand.candidate) {
+          await pc.addIceCandidate(new RTCIceCandidate({
+            candidate: cand.candidate,
+            sdpMid: cand.sdpMid,
+            sdpMLineIndex: cand.sdpMLineIndex,
+          }));
+        }
       } catch (err) {
         console.log('[WARN] Error applying early ICE candidate:', err);
       }
@@ -161,10 +192,15 @@ export class WebRTCManager {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    await window.multiclip?.sendScreenShareAnswer(sourceDeviceId, {
-      streamId,
-      sdp: pc.localDescription,
-    });
+    if (pc.localDescription) {
+      await window.multiclip?.sendScreenShareAnswer(sourceDeviceId, {
+        streamId,
+        sdp: {
+          type: pc.localDescription.type,
+          sdp: pc.localDescription.sdp,
+        },
+      });
+    }
   }
 
   /**
@@ -172,13 +208,22 @@ export class WebRTCManager {
    */
   public async handleAnswer(payload: ScreenShareAnswerPayload): Promise<void> {
     const pc = this.peerConnections.get(payload.streamId);
-    if (pc && pc.signalingState !== 'stable') {
-      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+    if (pc && pc.signalingState !== 'stable' && payload.sdp && payload.sdp.sdp && payload.sdp.type) {
+      await pc.setRemoteDescription(new RTCSessionDescription({
+        type: payload.sdp.type,
+        sdp: payload.sdp.sdp,
+      }));
 
       const earlyCandidates = this.earlyIceCandidates.get(payload.streamId) || [];
       for (const cand of earlyCandidates) {
         try {
-          await pc.addIceCandidate(new RTCIceCandidate(cand));
+          if (cand && cand.candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate({
+              candidate: cand.candidate,
+              sdpMid: cand.sdpMid,
+              sdpMLineIndex: cand.sdpMLineIndex,
+            }));
+          }
         } catch (err) {
           console.log('[WARN] Error applying early ICE candidate in answer:', err);
         }
@@ -192,13 +237,17 @@ export class WebRTCManager {
    */
   public async handleIceCandidate(payload: ScreenShareIcePayload): Promise<void> {
     const pc = this.peerConnections.get(payload.streamId);
-    if (pc && pc.remoteDescription) {
+    if (pc && pc.remoteDescription && payload.candidate && payload.candidate.candidate) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        await pc.addIceCandidate(new RTCIceCandidate({
+          candidate: payload.candidate.candidate,
+          sdpMid: payload.candidate.sdpMid,
+          sdpMLineIndex: payload.candidate.sdpMLineIndex,
+        }));
       } catch (err) {
         console.log('[WARN] ICE candidate error:', err);
       }
-    } else {
+    } else if (payload.candidate) {
       // Buffer candidate until remote description is set
       const list = this.earlyIceCandidates.get(payload.streamId) || [];
       list.push(payload.candidate);
