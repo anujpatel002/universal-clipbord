@@ -20,7 +20,7 @@ export class ClipboardMonitor extends EventEmitter {
     super();
   }
 
-  public start(intervalMs = 800): void {
+  public start(intervalMs = 250): void {
     // Initial check
     this.checkClipboard();
 
@@ -36,11 +36,13 @@ export class ClipboardMonitor extends EventEmitter {
       // 1. Check for file path in native clipboard buffers (e.g. Windows FileNameW)
       const detectedFilePath = this.detectCopiedFilePath();
       if (detectedFilePath && detectedFilePath !== this.lastFilePath) {
-        this.lastFilePath = detectedFilePath;
-        const item = this.createLocalFileItem(detectedFilePath);
-        if (item) {
-          this.emit('clipboard_updated', item);
-          return;
+        if (!this.suppressedTexts.has(detectedFilePath)) {
+          this.lastFilePath = detectedFilePath;
+          const item = this.createLocalFileItem(detectedFilePath);
+          if (item) {
+            this.emit('clipboard_updated', item);
+            return;
+          }
         }
       }
 
@@ -53,15 +55,21 @@ export class ClipboardMonitor extends EventEmitter {
 
       this.lastText = currentText;
 
-      // Check if text is actually a local file path
+      // Check if text is actually a local file path copied via path string
       if (fs.existsSync(currentText.trim())) {
-        const stats = fs.statSync(currentText.trim());
-        if (stats.isFile() || stats.isDirectory()) {
-          const item = this.createLocalFileItem(currentText.trim());
-          if (item) {
-            this.emit('clipboard_updated', item);
-            return;
+        try {
+          const stats = fs.statSync(currentText.trim());
+          if (stats.isFile() || stats.isDirectory()) {
+            if (!this.suppressedTexts.has(currentText.trim())) {
+              const item = this.createLocalFileItem(currentText.trim());
+              if (item) {
+                this.emit('clipboard_updated', item);
+                return;
+              }
+            }
           }
+        } catch {
+          // Continue as plain text
         }
       }
 
@@ -161,6 +169,48 @@ export class ClipboardMonitor extends EventEmitter {
       }
     } catch {
       // Headless/test fallback
+    }
+  }
+
+  /**
+   * Writes a file to the native OS clipboard so pressing Ctrl+V in Windows Explorer
+   * pastes the actual file, and in text editors pastes the file path.
+   */
+  public setClipboardFile(filePath: string, skipBroadcast = true): void {
+    if (!fs.existsSync(filePath)) return;
+    if (skipBroadcast) {
+      this.lastFilePath = filePath;
+      this.suppressedTexts.add(filePath);
+      setTimeout(() => this.suppressedTexts.delete(filePath), 5000);
+    }
+    this.lastText = filePath;
+
+    try {
+      if (!clipboard) return;
+
+      // 1. Text representation for code editors, browsers, terminals
+      if (typeof clipboard.writeText === 'function') {
+        clipboard.writeText(filePath);
+      }
+
+      // 2. Windows Explorer HDROP / FileNameW format for native file paste
+      if (process.platform === 'win32' && typeof clipboard.writeBuffer === 'function') {
+        const fileBuf = Buffer.from(filePath + '\0\0', 'utf16le');
+        clipboard.writeBuffer('FileNameW', fileBuf);
+
+        // Standard Windows DROPFILES structure:
+        // DWORD pFiles (offset 20) | POINT pt (0,0) | BOOL fNC (0) | BOOL fWide (1 = Unicode)
+        const header = Buffer.alloc(20);
+        header.writeUInt32LE(20, 0); // pFiles offset
+        header.writeUInt32LE(0, 4);  // pt.x
+        header.writeUInt32LE(0, 8);  // pt.y
+        header.writeUInt32LE(0, 12); // fNC
+        header.writeUInt32LE(1, 16); // fWide = 1 (Unicode)
+        const dropFilesBuf = Buffer.concat([header, fileBuf]);
+        clipboard.writeBuffer('HDROP', dropFilesBuf);
+      }
+    } catch (err) {
+      console.log(`[WARN] Failed to write file to OS clipboard: ${(err as Error).message}`);
     }
   }
 

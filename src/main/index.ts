@@ -114,9 +114,15 @@ async function initializeApp(): Promise<void> {
 
       const item = message.payload as ClipboardItem;
       db?.addClipboardItem(item);
+
       if (item.type === 'text' && item.content) {
+        // Instant seamless text sync to OS clipboard
         clipboardMonitor?.setClipboardText(item.content, true);
+      } else if (item.type === 'file' && item.path && sender.id) {
+        // Seamless file sync: Automatically fetch file in background so user can Ctrl+V immediately
+        transferManager?.requestFileFromPeer(sender.id, item.path);
       }
+
       mainWindow?.webContents.send('clipboard-updated', item);
     }
   });
@@ -131,6 +137,16 @@ async function initializeApp(): Promise<void> {
 
   transferManager.on('transfer_updated', (transfer) => {
     mainWindow?.webContents.send('transfer-updated', transfer);
+
+    // When an inbound file transfer completes, write it directly to OS clipboard for native Ctrl+V
+    const local = network?.getLocalInfo();
+    if (transfer.status === 'completed' && local && transfer.destinationDeviceId === local.id) {
+      if (transferManager) {
+        const destFilePath = path.join(transferManager.getDownloadDir(), transfer.fileName);
+        clipboardMonitor?.setClipboardFile(destFilePath, true);
+        console.log(`[INFO] Seamlessly synced file to OS clipboard: ${destFilePath} (Ready for Ctrl+V)`);
+      }
+    }
   });
 
   network.on('pairing_request', (req) => {
